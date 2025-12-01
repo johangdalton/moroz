@@ -22,7 +22,7 @@ func (svc *SantaService) UploadEvent(ctx context.Context, machineID string, even
 	}
 	for _, ev := range events {
 		eventDir := filepath.Join(svc.eventDir, ev.FileSHA, machineID)
-		if err := os.MkdirAll(eventDir, 0700); err != nil {
+		if err := os.MkdirAll(eventDir, 0750); err != nil {
 			return errors.Wrapf(err, "create event directory %s", eventDir)
 		}
 
