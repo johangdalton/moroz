@@ -1,3 +1,0 @@
-# test log
-getenv REPLACE_GOLDEN
-open testdata/config_a_toml.golden
