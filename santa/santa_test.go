@@ -15,8 +15,54 @@ func TestConfigMarshalUnmarshal(t *testing.T) {
 		t.Errorf("have client_mode %d, want %d\n", have, want)
 	}
 
-	if have, want := conf.FullSyncInterval, 600; have != want {
-		t.Errorf("have full_sync_interval %d, want %d\n", have, want)
+	if have, want := conf.FullSyncIntervalSeconds, 600; have != want {
+		t.Errorf("have full_sync_interval_seconds %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.SyncType, SyncTypeClean; have != want {
+		t.Errorf("have sync_type %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.DisableUnknownEventUpload, true; have != want {
+		t.Errorf("have disable_unknown_event_upload %t, want %t\n", have, want)
+	}
+
+	if have, want := conf.PushNotificationFullSyncIntervalSeconds, 14400; have != want {
+		t.Errorf("have push_notification_full_sync_interval_seconds %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.PushNotificationGlobalRuleSyncDeadlineSeconds, 600; have != want {
+		t.Errorf("have push_notification_global_rule_sync_deadline_seconds %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.BlockUSBMount, true; have != want {
+		t.Errorf("have block_usb_mount %t, want %t\n", have, want)
+	}
+
+	if have, want := len(conf.RemountUSBMode), 2; have != want {
+		t.Errorf("have remount_usb_mode len %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.OverrideFileAccessAction, FileAccessActionAuditOnly; have != want {
+		t.Errorf("have override_file_access_action %d, want %d\n", have, want)
+	}
+
+	if have, want := conf.EventDetailURL, "https://example.com/block?path=%{path}"; have != want {
+		t.Errorf("have event_detail_url %s, want %s\n", have, want)
+	}
+
+	if have, want := conf.EventDetailText, "More details"; have != want {
+		t.Errorf("have event_detail_text %s, want %s\n", have, want)
+	}
+
+	if conf.ExportConfiguration == nil || conf.ExportConfiguration.SignedPost == nil {
+		t.Fatalf("export_configuration.signed_post missing\n")
+	}
+	if have, want := conf.ExportConfiguration.SignedPost.URL, "https://storage.example.com/upload"; have != want {
+		t.Errorf("have signed_post.url %s, want %s\n", have, want)
+	}
+	if have, want := conf.ExportConfiguration.SignedPost.FormValues["key"], "uploads/${filename}"; have != want {
+		t.Errorf("have signed_post.form_values[key] %s, want %s\n", have, want)
 	}
 
 	if have, want := conf.Rules[0].Identifier, "2dc104631939b4bdf5d6bccab76e166e37fe5e1605340cf68dab919df58b8eda"; have != want {

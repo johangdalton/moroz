@@ -16,56 +16,85 @@ type Config struct {
 // Rule is a Santa rule.
 // https://github.com/google/santa/blob/ff0efe952b2456b52fad2a40e6eedb0931e6bdf7/docs/development/sync-protocol.md#rules-objects
 type Rule struct {
-	RuleType      RuleType `json:"rule_type" toml:"rule_type"`
-	Policy        Policy   `json:"policy" toml:"policy"`
-	Identifier    string   `json:"identifier" toml:"identifier"`
-	CustomMessage string   `json:"custom_msg,omitempty" toml:"custom_msg,omitempty"`
-	CustomUrl     string   `json:"custom_url,omitempty" toml:"custom_url,omitempty"`
-	// TODO: add support for the following fields
-	// CreationTime          float64  `json:"creation_time,omitempty" toml:"creation_time,omitempty"`
-	// FileBundleBinaryCount int      `json:"file_bundle_binary_count,omitempty" toml:"file_bundle_binary_count,omitempty"`
-	// FileBundleHash        string   `json:"file_bundle_hash,omitempty" toml:"file_bundle_hash,omitempty"`
+	RuleType              RuleType `json:"rule_type" toml:"rule_type"`
+	Policy                Policy   `json:"policy" toml:"policy"`
+	Identifier            string   `json:"identifier" toml:"identifier"`
+	CustomMessage         string   `json:"custom_msg,omitempty" toml:"custom_msg,omitempty"`
+	CustomUrl             string   `json:"custom_url,omitempty" toml:"custom_url,omitempty"`
+	FileBundleBinaryCount *int     `json:"file_bundle_binary_count,omitempty" toml:"file_bundle_binary_count,omitempty"`
+	FileBundleHash        *string  `json:"file_bundle_hash,omitempty" toml:"file_bundle_hash,omitempty"`
+	DeprecatedSHA256      *string  `json:"deprecated_sha256,omitempty" toml:"deprecated_sha256,omitempty"`
 }
 
 // Preflight represents sync response sent to a Santa client by the sync server.
 // https://github.com/google/santa/blob/344a35aaf63c24a56f7a021ce18ecab090584da3/docs/development/sync-protocol.md#preflight-response
 type Preflight struct {
-	ClientMode            ClientMode `json:"client_mode" toml:"client_mode"`
-	BlockedPathRegex      string     `json:"blocked_path_regex" toml:"blocked_path_regex"`
-	AllowedPathRegex      string     `json:"allowed_path_regex" toml:"allowed_path_regex"`
-	BatchSize             int        `json:"batch_size" toml:"batch_size"`
-	EnableAllEventUpload  bool       `json:"enable_all_event_upload" toml:"enable_all_event_upload"`
-	EnableBundles         bool       `json:"enable_bundles" toml:"enable_bundles"`
-	EnableTransitiveRules bool       `json:"enable_transitive_rules" toml:"enable_transitive_rules"`
-	CleanSync             bool       `json:"clean_sync" toml:"clean_sync,omitempty"`
-	FullSyncInterval      int        `json:"full_sync_interval" toml:"full_sync_interval"`
-	// TODO: add support for sync_type and deprecate clean_sync
-	//	SyncType                 string     `json:"sync_type" toml:"sync_type,omitempty"`
-	// TODO: add in support for the following fields
-	//	BlockUSBMount            bool   `json:"block_usb_mount" toml:"block_usb_mount,omitempty"`
-	//	RemountUSBMode           string `json:"remount_usb_mode" toml:"remount_usb_mode,omitempty"`
-	//	OverrideFileAccessAction string `json:"override_file_access_action" toml:"override_file_access_action,omitempty"`
+	ClientMode ClientMode `json:"client_mode" toml:"client_mode"`
+
+	// Sync configuration
+	SyncType                                      SyncType `json:"sync_type,omitempty" toml:"sync_type,omitempty"`
+	BatchSize                                     int      `json:"batch_size" toml:"batch_size"`
+	FullSyncIntervalSeconds                       int      `json:"full_sync_interval" toml:"full_sync_interval_seconds"`
+	PushNotificationFullSyncIntervalSeconds       int      `json:"push_notification_full_sync_interval" toml:"push_notification_full_sync_interval_seconds,omitempty"`
+	PushNotificationGlobalRuleSyncDeadlineSeconds int      `json:"push_notification_global_rule_sync_deadline" toml:"push_notification_global_rule_sync_deadline_seconds,omitempty"`
+
+	// File-system policy
+	BlockedPathRegex         string               `json:"blocked_path_regex,omitempty" toml:"blocked_path_regex,omitempty"`
+	AllowedPathRegex         string               `json:"allowed_path_regex,omitempty" toml:"allowed_path_regex,omitempty"`
+	BlockUSBMount            bool                 `json:"block_usb_mount" toml:"block_usb_mount,omitempty"`
+	RemountUSBMode           []string             `json:"remount_usb_mode,omitempty" toml:"remount_usb_mode,omitempty"`
+	OverrideFileAccessAction FileAccessAction     `json:"override_file_access_action,omitempty" toml:"override_file_access_action,omitempty"`
+	EventDetailURL           string               `json:"event_detail_url,omitempty" toml:"event_detail_url,omitempty"`
+	EventDetailText          string               `json:"event_detail_text,omitempty" toml:"event_detail_text,omitempty"`
+	ExportConfiguration      *ExportConfiguration `json:"export_configuration,omitempty" toml:"export_configuration,omitempty"`
+
+	// Event upload controls
+	EnableAllEventUpload      bool `json:"enable_all_event_upload" toml:"enable_all_event_upload"`
+	DisableUnknownEventUpload bool `json:"disable_unknown_event_upload" toml:"disable_unknown_event_upload,omitempty"`
+
+	// Rules / bundles
+	EnableBundles         bool `json:"enable_bundles" toml:"enable_bundles"`
+	EnableTransitiveRules bool `json:"enable_transitive_rules" toml:"enable_transitive_rules"`
+
+	// Deprecated compatibility fields
+	CleanSync                                  bool   `json:"clean_sync,omitempty" toml:"clean_sync,omitempty"`
+	DeprecatedBundlesEnabled                   bool   `json:"bundles_enabled,omitempty" toml:"deprecated_bundles_enabled,omitempty"`
+	DeprecatedWhitelistRegex                   string `json:"whitelist_regex,omitempty" toml:"deprecated_whitelist_regex,omitempty"`
+	DeprecatedBlacklistRegex                   string `json:"blacklist_regex,omitempty" toml:"deprecated_blacklist_regex,omitempty"`
+	DeprecatedEnabledTransitiveWhitelisting    bool   `json:"enabled_transitive_whitelisting,omitempty" toml:"deprecated_enabled_transitive_whitelisting,omitempty"`
+	DeprecatedTransitiveWhitelistingEnabled    bool   `json:"transitive_whitelisting_enabled,omitempty" toml:"deprecated_transitive_whitelisting_enabled,omitempty"`
+	DeprecatedFcmFullSyncIntervalSeconds       int    `json:"fcm_full_sync_interval,omitempty" toml:"deprecated_fcm_full_sync_interval_seconds,omitempty"`
+	DeprecatedFcmGlobalRuleSyncDeadlineSeconds int    `json:"fcm_global_rule_sync_deadline,omitempty" toml:"deprecated_fcm_global_rule_sync_deadline_seconds,omitempty"`
 }
 
 // A PreflightPayload represents the request sent by a santa client to the sync server.
 // https://github.com/google/santa/blob/344a35aaf63c24a56f7a021ce18ecab090584da3/docs/development/sync-protocol.md#preflight-request
 type PreflightPayload struct {
-	SerialNumber         string     `json:"serial_num"`
-	Hostname             string     `json:"hostname"`
-	OSVersion            string     `json:"os_version"`
-	OSBuild              string     `json:"os_build"`
-	ModelIdentifier      string     `json:"model_identifier"`
-	SantaVersion         string     `json:"santa_version"`
-	PrimaryUser          string     `json:"primary_user"`
-	BinaryRuleCount      int        `json:"binary_rule_count"`
-	CertificateRuleCount int        `json:"certificate_rule_count"`
-	CompilerRuleCount    int        `json:"compiler_rule_count"`
-	TransitiveRuleCount  int        `json:"transitive_rule_count"`
-	TeamIDRuleCount      int        `json:"teamid_rule_count"`
-	SigningIDRuleCount   int        `json:"signingid_rule_count"`
-	CdHashRuleCount      int        `json:"cdhash_rule_count"`
-	ClientMode           ClientMode `json:"client_mode"`
-	RequestCleanSync     bool       `json:"request_clean_sync"`
+	SerialNumber          string     `json:"serial_num"`
+	Hostname              string     `json:"hostname"`
+	OSVersion             string     `json:"os_version"`
+	OSBuild               string     `json:"os_build"`
+	ModelIdentifier       string     `json:"model_identifier"`
+	SantaVersion          string     `json:"santa_version"`
+	PrimaryUser           string     `json:"primary_user"`
+	PushNotificationToken string     `json:"push_notification_token,omitempty"`
+	BinaryRuleCount       int        `json:"binary_rule_count"`
+	CertificateRuleCount  int        `json:"certificate_rule_count"`
+	CompilerRuleCount     int        `json:"compiler_rule_count"`
+	TransitiveRuleCount   int        `json:"transitive_rule_count"`
+	TeamIDRuleCount       int        `json:"teamid_rule_count"`
+	SigningIDRuleCount    int        `json:"signingid_rule_count"`
+	CdHashRuleCount       int        `json:"cdhash_rule_count"`
+	ClientMode            ClientMode `json:"client_mode"`
+	RequestCleanSync      bool       `json:"request_clean_sync"`
+	// Optional self-reported policy hints (pass-through)
+	BlockedPathRegex          string           `json:"blocked_path_regex,omitempty"`
+	AllowedPathRegex          string           `json:"allowed_path_regex,omitempty"`
+	BlockUSBMount             bool             `json:"block_usb_mount,omitempty"`
+	RemountUSBMode            []string         `json:"remount_usb_mode,omitempty"`
+	OverrideFileAccessAction  FileAccessAction `json:"override_file_access_action,omitempty"`
+	DisableUnknownEventUpload bool             `json:"disable_unknown_event_upload,omitempty"`
+	MachineID                 string           `json:"machine_id,omitempty"`
 }
 
 // Postflight represents sync response sent to a Santa client by the sync server.
@@ -77,8 +106,21 @@ type Postflight struct {
 // A PostflightPayload represents the request sent by a santa client to the sync server.
 // https://github.com/google/santa/blob/344a35aaf63c24a56f7a021ce18ecab090584da3/docs/development/sync-protocol.md#postflight-request
 type PostflightPayload struct {
-	RulesReceived  int `json:"rules_received"`
-	RulesProcessed int `json:"rules_processed"`
+	MachineID      string   `json:"machine_id,omitempty"`
+	SyncType       SyncType `json:"sync_type,omitempty"`
+	RulesReceived  int      `json:"rules_received"`
+	RulesProcessed int      `json:"rules_processed"`
+}
+
+// ExportConfiguration encapsulates export destinations Santa can push data to.
+type ExportConfiguration struct {
+	SignedPost *SignedPost `json:"signed_post,omitempty" toml:"signed_post,omitempty"`
+}
+
+// SignedPost describes a pre-signed POST destination for uploads.
+type SignedPost struct {
+	URL        string            `json:"url" toml:"url"`
+	FormValues map[string]string `json:"form_values" toml:"form_values"`
 }
 
 // EventPayload represents derived metadata for events uploaded with the UploadEvent endpoint.
@@ -90,7 +132,13 @@ type EventPayload struct {
 
 // EventUploadRequest encapsulation of an /eventupload POST body sent by a Santa client
 type EventUploadRequest struct {
-	Events []EventUploadEvent `json:"events"`
+	MachineID string             `json:"machine_id,omitempty"`
+	Events    []EventUploadEvent `json:"events"`
+}
+
+// EventUploadResponse mirrors santa.sync.v1.EventUploadResponse.
+type EventUploadResponse struct {
+	EventUploadBundleBinaries []string `json:"event_upload_bundle_binaries,omitempty"`
 }
 
 // EventUploadEvent is a single event entry
@@ -140,8 +188,10 @@ type SigningEntry struct {
 type RuleType int
 
 const (
+	RuleTypeUnknown RuleType = iota
+
 	// Binary rules use the SHA-256 hash of the entire binary as an identifier.
-	Binary RuleType = iota
+	Binary
 
 	// Certificate rules are formed from the SHA-256 fingerprint of an X.509 leaf signing certificate.
 	// This is a powerful rule type that has a much broader reach than an individual binary rule .
@@ -171,6 +221,8 @@ const (
 
 func (r *RuleType) UnmarshalText(text []byte) error {
 	switch t := string(text); t {
+	case "RULETYPE_UNKNOWN":
+		*r = RuleTypeUnknown
 	case "BINARY":
 		*r = Binary
 	case "CERTIFICATE":
@@ -189,6 +241,8 @@ func (r *RuleType) UnmarshalText(text []byte) error {
 
 func (r RuleType) MarshalText() ([]byte, error) {
 	switch r {
+	case RuleTypeUnknown:
+		return []byte("RULETYPE_UNKNOWN"), nil
 	case Binary:
 		return []byte("BINARY"), nil
 	case Certificate:
@@ -208,25 +262,40 @@ func (r RuleType) MarshalText() ([]byte, error) {
 type Policy int
 
 const (
-	Blocklist Policy = iota
+	PolicyUnknown Policy = iota
 	Allowlist
-
-	// AllowlistCompiler is a Transitive allowlist policy which allows allowlisting binaries created by
-	// a specific compiler. EnabledTransitiveAllowlisting must be set to true in the Preflight first.
 	AllowlistCompiler
+	Blocklist
+	SilentBlocklist
 	Remove
+	Cel
 )
 
 func (p *Policy) UnmarshalText(text []byte) error {
 	switch t := string(text); t {
-	case "BLOCKLIST":
-		*p = Blocklist
 	case "ALLOWLIST":
 		*p = Allowlist
 	case "ALLOWLIST_COMPILER":
 		*p = AllowlistCompiler
+	case "BLOCKLIST":
+		*p = Blocklist
+	case "SILENT_BLOCKLIST":
+		*p = SilentBlocklist
 	case "REMOVE":
 		*p = Remove
+	case "CEL":
+		*p = Cel
+	case "POLICY_UNKNOWN":
+		*p = PolicyUnknown
+	// Backward-compat aliases
+	case "WHITELIST":
+		*p = Allowlist
+	case "WHITELIST_COMPILER":
+		*p = AllowlistCompiler
+	case "BLACKLIST":
+		*p = Blocklist
+	case "SILENT_BLACKLIST":
+		*p = SilentBlocklist
 	default:
 		return errors.Errorf("unknown policy value %q", t)
 	}
@@ -235,14 +304,20 @@ func (p *Policy) UnmarshalText(text []byte) error {
 
 func (p Policy) MarshalText() ([]byte, error) {
 	switch p {
-	case Blocklist:
-		return []byte("BLOCKLIST"), nil
+	case PolicyUnknown:
+		return []byte("POLICY_UNKNOWN"), nil
 	case Allowlist:
 		return []byte("ALLOWLIST"), nil
 	case AllowlistCompiler:
 		return []byte("ALLOWLIST_COMPILER"), nil
+	case Blocklist:
+		return []byte("BLOCKLIST"), nil
+	case SilentBlocklist:
+		return []byte("SILENT_BLOCKLIST"), nil
 	case Remove:
 		return []byte("REMOVE"), nil
+	case Cel:
+		return []byte("CEL"), nil
 	default:
 		return nil, errors.Errorf("unknown policy %d", p)
 	}
@@ -276,5 +351,87 @@ func (c ClientMode) MarshalText() ([]byte, error) {
 		return []byte("LOCKDOWN"), nil
 	default:
 		return nil, errors.Errorf("unknown client_mode %d", c)
+	}
+}
+
+// SyncType mirrors the Santa sync_type values (deprecated in upstream but retained for compatibility).
+type SyncType int
+
+const (
+	SyncTypeUnspecified SyncType = iota
+	SyncTypeNormal
+	SyncTypeClean
+	SyncTypeCleanAll
+)
+
+func (s *SyncType) UnmarshalText(text []byte) error {
+	switch t := string(text); t {
+	case "", "SYNC_TYPE_UNSPECIFIED":
+		*s = SyncTypeUnspecified
+	case "NORMAL":
+		*s = SyncTypeNormal
+	case "CLEAN":
+		*s = SyncTypeClean
+	case "CLEAN_ALL":
+		*s = SyncTypeCleanAll
+	default:
+		return errors.Errorf("unknown sync_type value %q", t)
+	}
+	return nil
+}
+
+func (s SyncType) MarshalText() ([]byte, error) {
+	switch s {
+	case SyncTypeUnspecified:
+		return []byte("SYNC_TYPE_UNSPECIFIED"), nil
+	case SyncTypeNormal:
+		return []byte("NORMAL"), nil
+	case SyncTypeClean:
+		return []byte("CLEAN"), nil
+	case SyncTypeCleanAll:
+		return []byte("CLEAN_ALL"), nil
+	default:
+		return nil, errors.Errorf("unknown sync_type %d", s)
+	}
+}
+
+// FileAccessAction controls Santa's temporary file access remount behaviour.
+type FileAccessAction int
+
+const (
+	FileAccessActionUnspecified FileAccessAction = iota
+	FileAccessActionNone
+	FileAccessActionAuditOnly
+	FileAccessActionDisable
+)
+
+func (a *FileAccessAction) UnmarshalText(text []byte) error {
+	switch t := string(text); t {
+	case "", "FILE_ACCESS_ACTION_UNSPECIFIED":
+		*a = FileAccessActionUnspecified
+	case "NONE", "none":
+		*a = FileAccessActionNone
+	case "AUDIT_ONLY", "auditonly":
+		*a = FileAccessActionAuditOnly
+	case "DISABLE", "disable":
+		*a = FileAccessActionDisable
+	default:
+		return errors.Errorf("unknown override_file_access_action value %q", t)
+	}
+	return nil
+}
+
+func (a FileAccessAction) MarshalText() ([]byte, error) {
+	switch a {
+	case FileAccessActionUnspecified:
+		return []byte("FILE_ACCESS_ACTION_UNSPECIFIED"), nil
+	case FileAccessActionNone:
+		return []byte("none"), nil
+	case FileAccessActionAuditOnly:
+		return []byte("auditonly"), nil
+	case FileAccessActionDisable:
+		return []byte("disable"), nil
+	default:
+		return nil, errors.Errorf("unknown override_file_access_action %d", a)
 	}
 }

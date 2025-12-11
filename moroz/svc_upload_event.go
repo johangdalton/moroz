@@ -46,7 +46,8 @@ type eventRequest struct {
 }
 
 type eventResponse struct {
-	Err error
+	*santa.EventUploadResponse
+	Err error `json:"error,omitempty"`
 }
 
 func (r eventResponse) Failed() error { return r.Err }
@@ -55,7 +56,10 @@ func makeEventUploadEndpoint(svc Service) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
 		req := request.(eventRequest)
 		err := svc.UploadEvent(ctx, req.MachineID, req.events)
-		return eventResponse{Err: err}, nil
+		return eventResponse{
+			EventUploadResponse: &santa.EventUploadResponse{},
+			Err:                 err,
+		}, nil
 	}
 }
 
@@ -88,7 +92,12 @@ func decodeEventUpload(ctx context.Context, r *http.Request) (interface{}, error
 		events = append(events, payload)
 	}
 
-	req := eventRequest{MachineID: id, events: events}
+	reqID := id
+	if eventPayload.MachineID != "" {
+		reqID = eventPayload.MachineID
+	}
+
+	req := eventRequest{MachineID: reqID, events: events}
 	return req, nil
 }
 

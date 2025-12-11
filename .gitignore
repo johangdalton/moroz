@@ -9,3 +9,4 @@ cmd/moroz/moroz
 server.crt
 server.key
 *.swp
+.serena/

@@ -1,12 +1,31 @@
 client_mode = "LOCKDOWN"
+sync_type = "CLEAN"
+batch_size = 100
+full_sync_interval_seconds = 600
+push_notification_full_sync_interval_seconds = 14400
+push_notification_global_rule_sync_deadline_seconds = 600
 blocked_path_regex = "^(?:/Users)/.*"
 allowed_path_regex = "^(?:/Users)/.*"
-batch_size = 100
+block_usb_mount = true
+remount_usb_mode = ["read-only", "noexec"]
+override_file_access_action = "auditonly"
+event_detail_url = "https://example.com/block?path=%{path}"
+event_detail_text = "More details"
 enable_all_event_upload = true
+disable_unknown_event_upload = true
 enable_bundles = false
 enable_transitive_rules = true
 clean_sync = true
-full_sync_interval = 600
+deprecated_fcm_full_sync_interval_seconds = 0
+deprecated_fcm_global_rule_sync_deadline_seconds = 0
+
+[export_configuration]
+  [export_configuration.signed_post]
+    url = "https://storage.example.com/upload"
+    [export_configuration.signed_post.form_values]
+      key = "uploads/${filename}"
+      policy = "abcd"
+      signature = "1234"
 
 [[rules]]
   rule_type = "BINARY"

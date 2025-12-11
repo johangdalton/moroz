@@ -53,6 +53,9 @@ func decodePostflightRequest(ctx context.Context, r *http.Request) (interface{},
 	if err := json.NewDecoder(zr).Decode(&req.payload); err != nil {
 		return nil, err
 	}
+	if req.payload.MachineID != "" {
+		req.MachineID = req.payload.MachineID
+	}
 	return req, nil
 }
 

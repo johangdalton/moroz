@@ -1,12 +1,17 @@
 client_mode = "MONITOR"
-# blocked_path_regex = "^(?:/Users)/.*"
-# allowed_path_regex = "^(?:/Users)/.*"
 batch_size = 100
 enable_all_event_upload = true
 enable_bundles = false
 enable_transitive_rules = true
-clean_sync = true
-full_sync_interval = 600
+full_sync_interval_seconds = 600
+# push_notification_full_sync_interval_seconds = 14400
+# push_notification_global_rule_sync_deadline_seconds = 900
+# blocked_path_regex = "^(?:/Users)/.*"
+# allowed_path_regex = "^(?:/Users)/.*"
+# block_usb_mount = false
+# remount_usb_mode = [ "read-only" ]
+# override_file_access_action = "NONE"
+# disable_unknown_event_upload = false
 
 [[rules]]
 rule_type = "BINARY"
