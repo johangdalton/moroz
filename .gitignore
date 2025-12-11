@@ -10,3 +10,4 @@ server.crt
 server.key
 *.swp
 .serena/
+.gocache/
