@@ -57,3 +57,12 @@ func (f *FileRepo) Config(ctx context.Context, machineID string) (santa.Config, 
 	}
 	return c, nil
 }
+
+// Generation reports the version of the loaded snapshot for health checks.
+func (f *FileRepo) Generation() (string, bool) {
+	s := f.current.Load()
+	if s == nil {
+		return "", false
+	}
+	return s.version, true
+}

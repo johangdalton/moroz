@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
+	"github.com/go-kit/kit/log/level"
 	"github.com/groob/moroz/santa"
 )
 
@@ -15,8 +16,10 @@ func (svc *SantaService) Preflight(ctx context.Context, machineID string, p sant
 		return nil, err
 	}
 	if svc.outbox != nil {
+		// Telemetry is best-effort here. Santa aborts the whole sync when the
+		// preflight fails, so a full or closed queue must never block rules.
 		if err := svc.outbox.Preflight(ctx, machineID, p); err != nil {
-			return nil, telemetryUnavailable{err}
+			level.Warn(svc.logger).Log("msg", "preflight telemetry dropped; rule delivery continues", "machine_id", machineID, "err", err)
 		}
 	}
 	pre := svc.beginSync(machineID, config, p.RequestCleanSync)
@@ -63,15 +66,26 @@ func decodePreflightRequest(ctx context.Context, r *http.Request) (interface{}, 
 
 func (mw logmw) Preflight(ctx context.Context, machineID string, p santa.PreflightPayload) (pf *santa.Preflight, err error) {
 	defer func(begin time.Time) {
-		// Original go-kit logging
-		_ = mw.logger.Log(
+		// Hostname, serial number and primary user are personal data and are
+		// only logged when payload logging is explicitly enabled.
+		keyvals := []interface{}{
 			"method", "Preflight",
 			"machine_id", machineID,
-			"preflight_payload", p,
-			"err", err,
-			"took", time.Since(begin),
-		)
-
+			"santa_version", p.SantaVersion,
+			"client_mode", textOf(p.ClientMode),
+			"request_clean_sync", p.RequestCleanSync,
+			"binary_rules", p.BinaryRuleCount,
+			"certificate_rules", p.CertificateRuleCount,
+			"compiler_rules", p.CompilerRuleCount,
+			"transitive_rules", p.TransitiveRuleCount,
+			"teamid_rules", p.TeamIDRuleCount,
+			"signingid_rules", p.SigningIDRuleCount,
+			"cdhash_rules", p.CdHashRuleCount,
+		}
+		if mw.logPayloads {
+			keyvals = append(keyvals, "preflight_payload", p)
+		}
+		_ = mw.logger.Log(append(keyvals, "err", err, "took", time.Since(begin))...)
 	}(time.Now())
 
 	pf, err = mw.next.Preflight(ctx, machineID, p)

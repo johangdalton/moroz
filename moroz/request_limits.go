@@ -7,13 +7,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const maxRequestBytes = 4 << 20
-const maxDecodedBytes = 16 << 20
+
+// Santa uploads at most batch_size (100) events per request, well under 1 MiB.
+const maxDecodedBytes = 4 << 20
 const maxBatchEvents = 1000
 
 var machineName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
@@ -25,7 +30,8 @@ func validMachine(id string) bool {
 
 // ClientGuard binds each token to one explicitly provisioned machine. Tests can
 // pass nil credentials only through the CLI's explicit development-mode flag.
-func ClientGuard(credentials map[string]string) func(http.Handler) http.Handler {
+// A nil limiter disables per-machine rate and global concurrency limits.
+func ClientGuard(credentials map[string]string, limiter *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, err := machineIDFromRequest(r)
@@ -40,6 +46,22 @@ func ClientGuard(credentials map[string]string) func(http.Handler) http.Handler 
 					http.Error(w, "invalid client credentials", http.StatusUnauthorized)
 					return
 				}
+			}
+			if limiter != nil {
+				// Limits apply only after authentication so they are keyed on
+				// a provisioned machine, never on attacker-chosen input.
+				if ok, retryAfter := limiter.Allow(id, time.Now()); !ok {
+					w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+					http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+					return
+				}
+				release, ok := limiter.acquire(r.Context())
+				if !ok {
+					w.Header().Set("Retry-After", strconv.Itoa(int(semaphoreWait.Seconds())))
+					http.Error(w, "server busy", http.StatusServiceUnavailable)
+					return
+				}
+				defer release()
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 			next.ServeHTTP(w, r)

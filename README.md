@@ -28,14 +28,20 @@ batch_size = 100
 [[rules]]
 rule_type = "BINARY"
 policy = "BLOCKLIST"
-sha256 = "2dc104631939b4bdf5d6bccab76e166e37fe5e1605340cf68dab919df58b8eda"
+identifier = "2dc104631939b4bdf5d6bccab76e166e37fe5e1605340cf68dab919df58b8eda"
 custom_msg = "blocklist firefox"
 
 [[rules]]
 rule_type = "CERTIFICATE"
 policy = "BLOCKLIST"
-sha256 = "e7726cf87cba9e25139465df5bd1557c8a8feed5c7dd338342d8da0959b63c8d"
+identifier = "e7726cf87cba9e25139465df5bd1557c8a8feed5c7dd338342d8da0959b63c8d"
 custom_msg = "blocklist dash app certificate"
+
+[[rules]]
+rule_type = "CDHASH"
+policy = "SILENT_BLOCKLIST"
+identifier = "935bc0fb5ca31ed7e508b9c5883630fb5b96793a"
+custom_msg = "silently block one build of an app"
 
 [[rules]]
 rule_type = "TEAMID"
@@ -57,15 +63,23 @@ Acceptable values for client mode:
 MONITOR | LOCKDOWN
 ```
 
-Values for `rule_type`:
+Values for `rule_type`, with the `identifier` format each one requires:
 ```
-BINARY | CERTIFICATE | TEAMID | SIGNINGID
+BINARY      | 64 hex characters (SHA-256 of the file)
+CERTIFICATE | 64 hex characters (SHA-256 of the leaf signing certificate)
+CDHASH      | 40 hex characters (code directory hash)
+TEAMID      | 10 uppercase letters or digits, e.g. EQHXZ8M8AV
+SIGNINGID   | TEAMID:signing.id or platform:signing.id
 ```
 
 Values for `policy`:
 ```
-BLOCKLIST | ALLOWLIST | ALLOWLIST_COMPILER | REMOVE
+BLOCKLIST | SILENT_BLOCKLIST | ALLOWLIST | ALLOWLIST_COMPILER | REMOVE
 ```
+
+Every rule needs `rule_type`, `policy` and `identifier`. A config file with an
+unknown key (for example `sha256 =` instead of `identifier =`) or a malformed
+identifier is rejected as a whole and the previously loaded policy stays active.
 
 Use the `santactl` command to get the sha256 value: 
 ```bash

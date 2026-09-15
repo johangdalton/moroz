@@ -38,7 +38,7 @@ func fixtureService(t *testing.T) (*SantaService, *fixtureStore) {
 func TestClientAuthenticationAndInput(t *testing.T) {
 	svc, _ := fixtureService(t)
 	router := mux.NewRouter()
-	router.Use(ClientGuard(map[string]string{"mac-a": strings.Repeat("a", 32), "mac-b": strings.Repeat("b", 32)}))
+	router.Use(ClientGuard(map[string]string{"mac-a": strings.Repeat("a", 32), "mac-b": strings.Repeat("b", 32)}, nil))
 	AddHTTPRoutes(router, MakeServerEndpoints(svc), log.NewNopLogger())
 	cases := []struct {
 		name, machine, token, body string
@@ -175,7 +175,7 @@ func TestEventBatchPersistenceAndRetention(t *testing.T) {
 func TestOversizedBodyAndBatch(t *testing.T) {
 	svc, _ := fixtureService(t)
 	router := mux.NewRouter()
-	router.Use(ClientGuard(nil))
+	router.Use(ClientGuard(nil, nil))
 	AddHTTPRoutes(router, MakeServerEndpoints(svc), log.NewNopLogger())
 	bodies := []string{strings.Repeat(" ", maxRequestBytes+1), `{"events":[` + strings.Repeat(`{"file_sha256":"`+strings.Repeat("a", 64)+`"},`, maxBatchEvents) + `{"file_sha256":"` + strings.Repeat("a", 64) + `"}]}`}
 	for _, body := range bodies {
@@ -193,7 +193,7 @@ func TestOversizedBodyAndBatch(t *testing.T) {
 func TestEmptyClientAllowlistRejectsEveryMachine(t *testing.T) {
 	svc, _ := fixtureService(t)
 	router := mux.NewRouter()
-	router.Use(ClientGuard(map[string]string{}))
+	router.Use(ClientGuard(map[string]string{}, nil))
 	AddHTTPRoutes(router, MakeServerEndpoints(svc), log.NewNopLogger())
 	r := httptest.NewRequest("POST", "/v1/santa/preflight/unregistered-mac", strings.NewReader("{}"))
 	r.Header.Set("Content-Encoding", "none")

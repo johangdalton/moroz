@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,9 +44,22 @@ type Outbox struct {
 	lock                 *os.File
 	pending              []queuedBatch
 	bytes, maxBytes      int64
+	dead                 int
+	quarantined          []string
+	headName             string
+	headFailures         int
 	client               *http.Client
 	wake                 chan struct{}
 	closed               bool
+}
+
+// OutboxStats is a point-in-time view of the queue for the health endpoint.
+type OutboxStats struct {
+	Pending      int
+	PendingBytes int64
+	MaxPending   int
+	MaxBytes     int64
+	Dead         int
 }
 
 var pendingFile = regexp.MustCompile(`^\.pending-[0-9]+$`)
@@ -53,6 +67,21 @@ var pendingFile = regexp.MustCompile(`^\.pending-[0-9]+$`)
 var batchFile = regexp.MustCompile(`^[0-9]{20}-[a-f0-9]{32}\.json$`)
 
 const maxPendingBatches = 50000
+
+// Re-encoding an accepted upload adds every event field name, so a stored
+// batch can exceed the decoded request size, but never by more than a factor
+// of two for the bounded number of events per batch.
+const maxBatchBytes = 2 * maxDecodedBytes
+
+// Consecutive read or decode failures of the head batch before it is
+// dead-lettered so that later batches can be delivered.
+const deadLetterAfterFailures = 20
+
+// Subdirectories of the outbox. Files are moved there, never deleted.
+const (
+	deadDir    = "dead"    // rejected by the manager or unreadable during delivery
+	corruptDir = "corrupt" // unparseable at startup
+)
 
 func syncDirectory(path string) error {
 	directory, err := os.Open(path)
@@ -82,6 +111,18 @@ func durableMkdir(path string) error {
 		return err
 	}
 	return syncDirectory(parent)
+}
+
+// validateBatch checks that a stored file is a batch this writer produced.
+func validateBatch(data []byte, name string) (TelemetryBatch, error) {
+	var batch TelemetryBatch
+	if err := json.Unmarshal(data, &batch); err != nil {
+		return batch, err
+	}
+	if batch.Version != 1 || batch.ID != strings.TrimSuffix(name[21:], ".json") || !validMachine(batch.MachineID) || (batch.Kind != "events" && batch.Kind != "preflight") {
+		return batch, fmt.Errorf("batch metadata does not match file name")
+	}
+	return batch, nil
 }
 
 func NewOutbox(directory, endpoint, token string, maxBytes int64) (*Outbox, error) {
@@ -128,28 +169,61 @@ func NewOutbox(directory, endpoint, token string, maxBytes int64) (*Outbox, erro
 			q.Close()
 			return nil, err
 		}
-		if !info.Mode().IsRegular() || info.Size() > 20<<20 {
-			q.Close()
-			return nil, fmt.Errorf("invalid outbox file %s", entry.Name())
+		// A corrupt file is quarantined, not fatal: exiting here would take the
+		// sync endpoint down for the whole fleet on every restart.
+		var reason string
+		if !info.Mode().IsRegular() || info.Size() > maxBatchBytes {
+			reason = "not a regular file within the batch size limit"
+		} else if data, err := os.ReadFile(filepath.Join(directory, entry.Name())); err != nil {
+			reason = err.Error()
+		} else if _, err := validateBatch(data, entry.Name()); err != nil {
+			reason = err.Error()
 		}
-		data, err := os.ReadFile(filepath.Join(directory, entry.Name()))
-		if err != nil {
-			q.Close()
-			return nil, err
-		}
-		var batch TelemetryBatch
-		if err := json.Unmarshal(data, &batch); err != nil || batch.Version != 1 || batch.ID != strings.TrimSuffix(entry.Name()[21:], ".json") || !validMachine(batch.MachineID) || (batch.Kind != "events" && batch.Kind != "preflight") {
-			q.Close()
-			return nil, fmt.Errorf("corrupt outbox file %s; preserve it for recovery", entry.Name())
+		if reason != "" {
+			if err := q.moveTo(entry.Name(), corruptDir); err != nil {
+				q.Close()
+				return nil, fmt.Errorf("cannot quarantine corrupt outbox file %s: %w", entry.Name(), err)
+			}
+			q.quarantined = append(q.quarantined, entry.Name()+": "+reason)
+			continue
 		}
 		q.pending = append(q.pending, queuedBatch{entry.Name(), info.Size()})
 		q.bytes += info.Size()
+	}
+	if dead, err := os.ReadDir(filepath.Join(directory, deadDir)); err == nil {
+		q.dead = len(dead)
+	} else if !os.IsNotExist(err) {
+		q.Close()
+		return nil, err
 	}
 	if err := syncDirectory(directory); err != nil {
 		q.Close()
 		return nil, err
 	}
 	return q, nil
+}
+
+// Quarantined lists the files moved to the corrupt directory at startup, each
+// with the reason, so the caller can log them.
+func (q *Outbox) Quarantined() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.quarantined...)
+}
+
+// moveTo relocates a batch file into a subdirectory of the outbox, durably.
+func (q *Outbox) moveTo(name, sub string) error {
+	target := filepath.Join(q.dir, sub)
+	if err := durableMkdir(target); err != nil {
+		return err
+	}
+	if err := os.Rename(filepath.Join(q.dir, name), filepath.Join(target, name)); err != nil {
+		return err
+	}
+	if err := syncDirectory(target); err != nil {
+		return err
+	}
+	return syncDirectory(q.dir)
 }
 
 // Close must be called after Run has stopped.
@@ -168,6 +242,11 @@ func (q *Outbox) Pending() (int, int64) {
 	defer q.mu.Unlock()
 	return len(q.pending), q.bytes
 }
+func (q *Outbox) Stats() OutboxStats {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return OutboxStats{Pending: len(q.pending), PendingBytes: q.bytes, MaxPending: maxPendingBatches, MaxBytes: q.maxBytes, Dead: q.dead}
+}
 
 func (q *Outbox) enqueue(ctx context.Context, batch TelemetryBatch) error {
 	if !validMachine(batch.MachineID) {
@@ -184,7 +263,7 @@ func (q *Outbox) enqueue(ctx context.Context, batch TelemetryBatch) error {
 	if err != nil {
 		return err
 	}
-	if len(data) > 20<<20 {
+	if len(data) > maxBatchBytes {
 		return fmt.Errorf("telemetry batch exceeds limit")
 	}
 	q.mu.Lock()
@@ -250,6 +329,54 @@ func (q *Outbox) Preflight(ctx context.Context, machine string, p santa.Prefligh
 	return q.enqueue(ctx, TelemetryBatch{Kind: "preflight", MachineID: machine, Preflight: &p})
 }
 
+// deadLettered reports a batch that was moved aside so delivery can continue.
+type deadLettered struct {
+	name, reason string
+}
+
+func (e deadLettered) Error() string {
+	return fmt.Sprintf("batch %s moved to %s: %s", e.name, deadDir, e.reason)
+}
+
+// deadLetter moves the head batch out of the queue. The file is preserved in
+// the dead directory for the operator; only a vanished file is dropped.
+func (q *Outbox) deadLetter(head queuedBatch, reason string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.pending) == 0 || q.pending[0].name != head.name {
+		return nil
+	}
+	if err := q.moveTo(head.name, deadDir); err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err != nil {
+		reason += " (file no longer exists)"
+	} else {
+		q.dead++
+	}
+	q.pending[0] = queuedBatch{}
+	q.pending = q.pending[1:]
+	q.bytes -= head.size
+	q.headName, q.headFailures = "", 0
+	return deadLettered{head.name, reason}
+}
+
+// headFailure counts consecutive local failures for the same head batch and
+// dead-letters it once the limit is reached; the returned error is what Run
+// should report.
+func (q *Outbox) headFailure(head queuedBatch, err error) error {
+	q.mu.Lock()
+	if q.headName != head.name {
+		q.headName, q.headFailures = head.name, 0
+	}
+	q.headFailures++
+	failures := q.headFailures
+	q.mu.Unlock()
+	if failures < deadLetterAfterFailures {
+		return err
+	}
+	return q.deadLetter(head, fmt.Sprintf("%d consecutive failures, last: %v", failures, err))
+}
+
 // deliverNext has a single consumer (Run). Producers never wait for HTTP I/O.
 func (q *Outbox) deliverNext(ctx context.Context) (bool, error) {
 	q.mu.Lock()
@@ -261,11 +388,11 @@ func (q *Outbox) deliverNext(ctx context.Context) (bool, error) {
 	q.mu.Unlock()
 	data, err := os.ReadFile(filepath.Join(q.dir, pending.name))
 	if err != nil {
-		return true, err
+		return true, q.headFailure(pending, err)
 	}
-	var batch TelemetryBatch
-	if err := json.Unmarshal(data, &batch); err != nil {
-		return true, err
+	batch, err := validateBatch(data, pending.name)
+	if err != nil {
+		return true, q.headFailure(pending, err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint, bytes.NewReader(data))
 	if err != nil {
@@ -279,6 +406,13 @@ func (q *Outbox) deliverNext(ctx context.Context) (bool, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		// A client error is specific to this batch and will not succeed on
+		// retry. Timeouts, throttling and our own credentials being rejected
+		// are not about the batch and keep the retry-with-backoff behaviour.
+		switch code := response.StatusCode; {
+		case code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests && code != http.StatusUnauthorized && code != http.StatusForbidden:
+			return true, q.deadLetter(pending, fmt.Sprintf("manager ingestion returned HTTP %d", code))
+		}
 		return true, fmt.Errorf("manager ingestion returned HTTP %d; batch retained", response.StatusCode)
 	}
 	var ack struct {
@@ -296,6 +430,7 @@ func (q *Outbox) deliverNext(ctx context.Context) (bool, error) {
 	q.pending[0] = queuedBatch{}
 	q.pending = q.pending[1:]
 	q.bytes -= pending.size
+	q.headName, q.headFailures = "", 0
 	return true, syncDirectory(q.dir)
 }
 func (q *Outbox) Run(ctx context.Context, report func(error)) {
@@ -312,6 +447,11 @@ func (q *Outbox) Run(ctx context.Context, report func(error)) {
 			}
 			if report != nil {
 				report(err)
+			}
+			// A dead-lettered batch is out of the way; move on without backoff.
+			if errors.As(err, new(deadLettered)) {
+				delay = time.Second
+				continue
 			}
 			timer := time.NewTimer(delay)
 			select {

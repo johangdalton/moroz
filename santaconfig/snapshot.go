@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -73,6 +74,48 @@ func configSource(root string) (string, []string, error) {
 	return fmt.Sprintf("legacy:%x", h.Sum(nil)), paths, nil
 }
 
+var (
+	sha256Hex   = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	cdhashHex   = regexp.MustCompile(`^[a-f0-9]{40}$`)
+	teamIDForm  = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+	signingForm = regexp.MustCompile(`^(?:[A-Z0-9]{10}|platform):[^\s:]+$`)
+)
+
+// validateRules rejects rules Santa would ignore or misapply. Hex identifiers
+// are normalised to lowercase in place.
+func validateRules(rules []santa.Rule) error {
+	for i := range rules {
+		rule := &rules[i]
+		if rule.RuleType == santa.RuleTypeUnknown {
+			return fmt.Errorf("rule %d: rule_type is required", i+1)
+		}
+		if rule.Policy == santa.PolicyUnknown {
+			return fmt.Errorf("rule %d: policy is required", i+1)
+		}
+		var format *regexp.Regexp
+		var expected string
+		switch rule.RuleType {
+		case santa.Binary, santa.Certificate:
+			rule.Identifier = strings.ToLower(rule.Identifier)
+			format, expected = sha256Hex, "a 64-character hex SHA-256"
+		case santa.CdHash:
+			rule.Identifier = strings.ToLower(rule.Identifier)
+			format, expected = cdhashHex, "a 40-character hex code directory hash"
+		case santa.TeamID:
+			format, expected = teamIDForm, "a 10-character Apple team ID"
+		case santa.SigningID:
+			format, expected = signingForm, "TEAMID:signing.id or platform:signing.id"
+		default:
+			return fmt.Errorf("rule %d: unsupported rule_type %d", i+1, rule.RuleType)
+		}
+		if !format.MatchString(rule.Identifier) {
+			ruleType, _ := rule.RuleType.MarshalText()
+			return fmt.Errorf("rule %d (%s): identifier %q must be %s", i+1, ruleType, rule.Identifier, expected)
+		}
+	}
+	return nil
+}
+
 // Reload builds a new snapshot separately, then publishes it in one atomic swap.
 // Errors preserve the last valid snapshot. Unchanged sources are not reparsed.
 func (f *FileRepo) Reload(ctx context.Context) error {
@@ -102,8 +145,21 @@ func (f *FileRepo) Reload(ctx context.Context) error {
 			return err
 		}
 		var config santa.Config
-		if err := toml.Unmarshal(content, &config); err != nil {
+		metadata, err := toml.Decode(string(content), &config)
+		if err != nil {
 			return fmt.Errorf("decode %s: %w", path, err)
+		}
+		// A misspelt key would otherwise be dropped silently, for example a
+		// rule with "sha256" instead of "identifier" yields an empty identifier.
+		if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
+			keys := make([]string, len(undecoded))
+			for i, key := range undecoded {
+				keys[i] = key.String()
+			}
+			return fmt.Errorf("decode %s: unknown keys: %s", path, strings.Join(keys, ", "))
+		}
+		if err := validateRules(config.Rules); err != nil {
+			return fmt.Errorf("validate %s: %w", path, err)
 		}
 		config.MachineID = strings.TrimSuffix(filepath.Base(path), ".toml")
 		if !validName(config.MachineID) {
@@ -134,5 +190,33 @@ func (f *FileRepo) Watch(ctx context.Context, interval time.Duration, onError fu
 				onError(err)
 			}
 		}
+	}
+}
+
+// ThrottleErrors returns an error callback that forwards to log only when the
+// error text differs from the previous one or interval has passed since the
+// last forwarded error. repeats counts the suppressed calls in between.
+func ThrottleErrors(interval time.Duration, log func(err error, repeats int)) func(error) {
+	return throttleErrors(interval, log, time.Now)
+}
+
+func throttleErrors(interval time.Duration, log func(err error, repeats int), now func() time.Time) func(error) {
+	var (
+		mu       sync.Mutex
+		last     string
+		loggedAt time.Time
+		repeats  int
+	)
+	return func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		text := err.Error()
+		t := now()
+		if text == last && t.Sub(loggedAt) < interval {
+			repeats++
+			return
+		}
+		log(err, repeats)
+		last, loggedAt, repeats = text, t, 0
 	}
 }

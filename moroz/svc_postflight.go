@@ -54,13 +54,17 @@ func decodePostflightRequest(ctx context.Context, r *http.Request) (interface{},
 
 func (mw logmw) Postflight(ctx context.Context, machineID string, p santa.PostflightPayload) (pf *santa.Postflight, err error) {
 	defer func(begin time.Time) {
-		_ = mw.logger.Log(
+		keyvals := []interface{}{
 			"method", "Postflight",
 			"machine_id", machineID,
-			"postflight_payload", p,
-			"err", err,
-			"took", time.Since(begin),
-		)
+			"sync_type", textOf(p.SyncType),
+			"rules_received", p.RulesReceived,
+			"rules_processed", p.RulesProcessed,
+		}
+		if mw.logPayloads {
+			keyvals = append(keyvals, "postflight_payload", p)
+		}
+		_ = mw.logger.Log(append(keyvals, "err", err, "took", time.Since(begin))...)
 	}(time.Now())
 
 	pf, err = mw.next.Postflight(ctx, machineID, p)

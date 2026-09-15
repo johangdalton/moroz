@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
+	"github.com/go-kit/kit/log"
 	"github.com/groob/moroz/santa"
 )
 
@@ -16,6 +17,7 @@ type ConfigStore interface {
 
 type SantaService struct {
 	outbox             *Outbox
+	logger             log.Logger
 	eventMu            sync.Mutex
 	eventLogDay        string
 	eventRetentionDays int
@@ -36,6 +38,7 @@ func NewService(ds ConfigStore, eventDir string, flPersistEvents bool) (*SantaSe
 		return nil, err
 	}
 	return &SantaService{
+		logger:             log.NewNopLogger(),
 		eventRetentionDays: 90,
 		global:             global,
 		sessions:           make(map[string]syncSession),
@@ -71,3 +74,10 @@ func MakeServerEndpoints(svc Service) Endpoints {
 
 // SetOutbox is called during startup before serving requests.
 func (svc *SantaService) SetOutbox(q *Outbox) { svc.outbox = q }
+
+// SetLogger is called during startup before serving requests.
+func (svc *SantaService) SetLogger(logger log.Logger) {
+	if logger != nil {
+		svc.logger = logger
+	}
+}
