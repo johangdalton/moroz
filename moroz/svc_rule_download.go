@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
-
-	"compress/zlib"
 
 	"github.com/go-kit/kit/endpoint"
 	"github.com/groob/moroz/santa"
 )
 
 func (svc *SantaService) RuleDownload(ctx context.Context, machineID string) ([]santa.Rule, error) {
+	if config, ok := svc.sessionConfig(machineID); ok {
+		return config.Rules, nil
+	}
 	config, err := svc.config(ctx, machineID)
 	return config.Rules, err
 }
@@ -48,6 +50,9 @@ func makeRuleDownloadEndpoint(svc Service) endpoint.Endpoint {
 		if err != nil {
 			return rulesResponse{Err: err}, nil
 		}
+		if rules == nil {
+			rules = []santa.Rule{}
+		}
 		return rulesResponse{Rules: rules, Cursor: ""}, nil
 	}
 }
@@ -62,33 +67,30 @@ func decodeRuleRequest(ctx context.Context, r *http.Request) (interface{}, error
 
 	req := ruleRequest{MachineID: id}
 
-	// Optional JSON payload (may be zlib-compressed) that carries cursor/machine_id.
-	// We accept empty bodies for backward compatibility.
-	bodyBytes, _ := io.ReadAll(r.Body)
+	// Empty requests are accepted for legacy clients; nonempty requests must
+	// be valid JSON using a supported content encoding.
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
+	if err != nil || len(bodyBytes) > maxRequestBytes {
+		return nil, fmt.Errorf("invalid or oversized rule request")
+	}
 	if len(bodyBytes) == 0 {
 		return req, nil
 	}
-
-	payload := bodyBytes
-	if zr, zerr := zlib.NewReader(bytes.NewReader(bodyBytes)); zerr == nil {
-		defer zr.Close()
-		if decompressed, derr := io.ReadAll(zr); derr == nil {
-			payload = decompressed
-		}
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	if r.Header.Get("Content-Encoding") == "" && json.Valid(bodyBytes) {
+		r.Header.Set("Content-Encoding", "identity")
 	}
-
 	var body struct {
 		Cursor    string `json:"cursor"`
 		MachineID string `json:"machine_id"`
 	}
-	if jerr := json.Unmarshal(payload, &body); jerr == nil {
-		if body.Cursor != "" {
-			req.Cursor = body.Cursor
-		}
-		if body.MachineID != "" {
-			req.MachineID = body.MachineID
-		}
+	if err := decodeJSON(r, &body); err != nil {
+		return nil, err
 	}
+	if err := validatePayloadID(id, body.MachineID); err != nil {
+		return nil, err
+	}
+	req.Cursor = body.Cursor
 
 	return req, nil
 }

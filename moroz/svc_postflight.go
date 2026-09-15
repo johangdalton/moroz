@@ -1,9 +1,7 @@
 package moroz
 
 import (
-	"compress/zlib"
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -12,6 +10,7 @@ import (
 )
 
 func (svc *SantaService) Postflight(ctx context.Context, machineID string, p santa.PostflightPayload) (*santa.Postflight, error) {
+	svc.finishSync(machineID)
 	return &santa.Postflight{}, nil
 }
 
@@ -39,22 +38,16 @@ func makePostflightEndpoint(svc Service) endpoint.Endpoint {
 }
 
 func decodePostflightRequest(ctx context.Context, r *http.Request) (interface{}, error) {
-	zr, err := zlib.NewReader(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	defer zr.Close()
-	defer r.Body.Close()
 	id, err := machineIDFromRequest(r)
 	if err != nil {
 		return nil, err
 	}
 	req := postflightRequest{MachineID: id}
-	if err := json.NewDecoder(zr).Decode(&req.payload); err != nil {
+	if err := decodeJSON(r, &req.payload); err != nil {
 		return nil, err
 	}
-	if req.payload.MachineID != "" {
-		req.MachineID = req.payload.MachineID
+	if err := validatePayloadID(id, req.payload.MachineID); err != nil {
+		return nil, err
 	}
 	return req, nil
 }

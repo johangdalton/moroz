@@ -82,26 +82,29 @@ cd cmd/moroz; go build
 
 # Run
 
-`moroz`  
-See `moroz -h` for a full list of options.
+This branch supports direct telemetry to the modified Moroz manager. A normal
+startup requires the manager endpoint and a separate service token file:
 
-```bash
-Usage of moroz:
-  -configs string
-    	path to config folder (default "../../configs")
-  -event-logfile string
-    	path to file for saving uploaded events (default "/tmp/santa_events")
-  -persist-events
-      Enable writing events to disk (default `true`)
-  -http-addr string
-    	http address ex: -http-addr=:8080 (default ":8080")
-  -tls-cert string
-    	path to TLS certificate (default "server.crt")
-  -tls-key string
-    	path to TLS private key (default "server.key")
-  -version
-    	print version information
+```sh
+moroz -configs=/config -client-credentials=/run/secrets/client_credentials \
+  -manager-url=http://moroz-manager:8090/api/internal/telemetry \
+  -ingest-token-file=/run/secrets/ingest_token \
+  -outbox-dir=/var/log/moroz/outbox
 ```
+
+Keep the outbox on persistent local storage. It synchronizes each batch before
+acknowledging Santa, retries delivery until the manager commits it, and recovers
+after restarts. The queue defaults to 1 GiB / 50,000 batches; full queues return
+503, pending batches never expire, and only one process may use a queue directory.
+An explicitly configured empty client-credentials JSON object starts with all
+clients denied; null or malformed files fail startup. The internal service token must be random and at least 32 characters; it is not a
+client credential. Use TLS for client access and cross-host manager connections.
+
+Without a manager, explicitly select `-standalone`. In that mode `-persist-events`
+(default true) writes dated JSONL files under `-event-dir`; it does not update the
+console. `-allow-unauthenticated` is for isolated synthetic tests only. Run
+`moroz -h` for all current flags. Earlier quickstart material below describes a
+standalone demonstration and needs these new explicit flags and client credentials.
 
 # Quickstart
 

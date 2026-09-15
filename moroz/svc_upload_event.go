@@ -1,13 +1,9 @@
 package moroz
 
 import (
-	"compress/zlib"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
@@ -17,27 +13,24 @@ import (
 )
 
 func (svc *SantaService) UploadEvent(ctx context.Context, machineID string, events []santa.EventPayload) error {
+	if !validMachine(machineID) {
+		return fmt.Errorf("invalid machine ID")
+	}
+	for _, ev := range events {
+		if !fileHash.MatchString(ev.FileSHA) {
+			return fmt.Errorf("invalid event file hash")
+		}
+	}
+	if svc.outbox != nil {
+		if err := svc.outbox.Events(ctx, machineID, events); err != nil {
+			return telemetryUnavailable{err}
+		}
+		return nil
+	}
 	if !svc.flPersistEvents {
 		return nil
 	}
-	for _, ev := range events {
-		eventDir := filepath.Join(svc.eventDir, ev.FileSHA, machineID)
-		if err := os.MkdirAll(eventDir, 0750); err != nil {
-			return errors.Wrapf(err, "create event directory %s", eventDir)
-		}
-
-		eventPath := filepath.Join(eventDir, fmt.Sprintf("%f.json", ev.UnixTime))
-
-		eventInfoJSON, err := json.Marshal(ev.EventInfo)
-		if err != nil {
-			return errors.Wrap(err, "marshal event info to json")
-		}
-
-		if err := os.WriteFile(eventPath, append(eventInfoJSON, '\n'), 0644); err != nil {
-			return errors.Wrapf(err, "write event to path %s", eventPath)
-		}
-	}
-	return nil
+	return svc.persistBatch(ctx, machineID, events)
 }
 
 type eventRequest struct {
@@ -64,13 +57,6 @@ func makeEventUploadEndpoint(svc Service) endpoint.Endpoint {
 }
 
 func decodeEventUpload(ctx context.Context, r *http.Request) (interface{}, error) {
-	// santa sends zlib compressed payloads
-	zr, err := zlib.NewReader(r.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "create zlib reader to decode event upload")
-	}
-	defer zr.Close()
-
 	id, err := machineIDFromRequest(r)
 	if err != nil {
 		return nil, errors.Wrap(err, "get machine ID from event upload URL")
@@ -79,12 +65,21 @@ func decodeEventUpload(ctx context.Context, r *http.Request) (interface{}, error
 	// decode the JSON into individual log events.
 	var eventPayload santa.EventUploadRequest
 
-	if err := json.NewDecoder(zr).Decode(&eventPayload); err != nil {
+	if err := decodeJSON(r, &eventPayload); err != nil {
 		return nil, errors.Wrap(err, "decoding event upload request json")
 	}
 
+	if len(eventPayload.Events) > maxBatchEvents {
+		return nil, fmt.Errorf("event batch exceeds limit")
+	}
+	if err := validatePayloadID(id, eventPayload.MachineID); err != nil {
+		return nil, err
+	}
 	var events []santa.EventPayload
 	for _, ev := range eventPayload.Events {
+		if !fileHash.MatchString(ev.FileSHA256) {
+			return nil, fmt.Errorf("invalid event file hash")
+		}
 		var payload santa.EventPayload
 		payload.EventInfo = ev
 		payload.FileSHA = ev.FileSHA256
@@ -103,15 +98,8 @@ func decodeEventUpload(ctx context.Context, r *http.Request) (interface{}, error
 
 func (mw logmw) UploadEvent(ctx context.Context, machineID string, events []santa.EventPayload) (err error) {
 	defer func(begin time.Time) {
-		for _, ev := range events {
-			_ = mw.logger.Log(
-				"method", "UploadEvent",
-				"machine_id", machineID,
-				"event", ev.EventInfo,
-				"err", err,
-				"took", time.Since(begin),
-			)
-		}
+		_ = mw.logger.Log("method", "UploadEvent", "machine_id", machineID,
+			"event_count", len(events), "err", err, "took", time.Since(begin))
 	}(time.Now())
 
 	err = mw.next.UploadEvent(ctx, machineID, events)

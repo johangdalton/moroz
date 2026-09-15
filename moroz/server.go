@@ -27,28 +27,28 @@ func AddHTTPRoutes(r *mux.Router, e Endpoints, logger log.Logger) {
 
 	r.Methods("POST").Path("/v1/santa/preflight/{id}").Handler(httptransport.NewServer(
 		e.PreflightEndpoint,
-		decodePreflightRequest,
+		clientDecode(decodePreflightRequest),
 		encodeResponse,
 		options...,
 	))
 
 	r.Methods("POST").Path("/v1/santa/ruledownload/{id}").Handler(httptransport.NewServer(
 		e.RuleDownloadEndpoint,
-		decodeRuleRequest,
+		clientDecode(decodeRuleRequest),
 		encodeResponse,
 		options...,
 	))
 
 	r.Methods("POST").Path("/v1/santa/eventupload/{id}").Handler(httptransport.NewServer(
 		e.EventUploadEndpoint,
-		decodeEventUpload,
+		clientDecode(decodeEventUpload),
 		encodeResponse,
 		options...,
 	))
 
 	r.Methods("POST").Path("/v1/santa/postflight/{id}").Handler(httptransport.NewServer(
 		e.PostflightEndpoint,
-		decodePostflightRequest,
+		clientDecode(decodePostflightRequest),
 		encodeResponse,
 		options...,
 	))
@@ -110,4 +110,19 @@ func errorEncoder(_ context.Context, err error, w http.ResponseWriter) {
 	w.WriteHeader(code)
 
 	enc.Encode(errMap)
+}
+
+// Invalid client input should not be retried as a server failure.
+type clientInputError struct{ err error }
+
+func (e clientInputError) Error() string   { return e.err.Error() }
+func (e clientInputError) StatusCode() int { return http.StatusBadRequest }
+func clientDecode(decode func(context.Context, *http.Request) (interface{}, error)) func(context.Context, *http.Request) (interface{}, error) {
+	return func(ctx context.Context, r *http.Request) (interface{}, error) {
+		value, err := decode(ctx, r)
+		if err != nil {
+			return nil, clientInputError{err}
+		}
+		return value, nil
+	}
 }

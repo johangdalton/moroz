@@ -2,6 +2,7 @@ package moroz
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
@@ -14,10 +15,17 @@ type ConfigStore interface {
 }
 
 type SantaService struct {
-	global          santa.Config
-	repo            ConfigStore
-	eventDir        string
-	flPersistEvents bool
+	outbox             *Outbox
+	eventMu            sync.Mutex
+	eventLogDay        string
+	eventRetentionDays int
+	sessionMu          sync.Mutex
+	sessions           map[string]syncSession
+	acknowledged       map[string][32]byte
+	global             santa.Config
+	repo               ConfigStore
+	eventDir           string
+	flPersistEvents    bool
 }
 
 func NewService(ds ConfigStore, eventDir string, flPersistEvents bool) (*SantaService, error) {
@@ -28,10 +36,13 @@ func NewService(ds ConfigStore, eventDir string, flPersistEvents bool) (*SantaSe
 		return nil, err
 	}
 	return &SantaService{
-		global:          global,
-		repo:            ds,
-		eventDir:        eventDir,
-		flPersistEvents: flPersistEvents,
+		eventRetentionDays: 90,
+		global:             global,
+		sessions:           make(map[string]syncSession),
+		acknowledged:       make(map[string][32]byte),
+		repo:               ds,
+		eventDir:           eventDir,
+		flPersistEvents:    flPersistEvents,
 	}, nil
 }
 
@@ -57,3 +68,6 @@ func MakeServerEndpoints(svc Service) Endpoints {
 		PostflightEndpoint:   makePostflightEndpoint(svc),
 	}
 }
+
+// SetOutbox is called during startup before serving requests.
+func (svc *SantaService) SetOutbox(q *Outbox) { svc.outbox = q }

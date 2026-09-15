@@ -2,91 +2,58 @@ package santaconfig
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-
-	"github.com/BurntSushi/toml"
+	"fmt"
 	"github.com/groob/moroz/santa"
-	"github.com/pkg/errors"
+	"sort"
+	"sync"
+	"sync/atomic"
 )
 
-func NewFileRepo(path string) *FileRepo {
-	repo := FileRepo{
-		configIndex: make(map[string]santa.Config),
-		configPath:  path,
-	}
-	return &repo
-}
+func NewFileRepo(path string) *FileRepo { return &FileRepo{configPath: path} }
 
 type FileRepo struct {
-	mtx         sync.RWMutex
-	configIndex map[string]santa.Config
-	configPath  string
+	reloadMu   sync.Mutex
+	current    atomic.Pointer[snapshot]
+	configPath string
 }
 
-func (f *FileRepo) updateIndex(configs []santa.Config) {
-	f.configIndex = make(map[string]santa.Config, len(configs))
-	for _, conf := range configs {
-		f.configIndex[conf.MachineID] = conf
+func (f *FileRepo) loaded(ctx context.Context) (*snapshot, error) {
+	if s := f.current.Load(); s != nil {
+		return s, nil
 	}
+	if err := f.Reload(ctx); err != nil {
+		return nil, err
+	}
+	return f.current.Load(), nil
 }
 
 func (f *FileRepo) AllConfigs(ctx context.Context) ([]santa.Config, error) {
-	f.mtx.Lock()
-	defer f.mtx.Unlock()
-
-	configs, err := loadConfigs(f.configPath)
+	s, err := f.loaded(ctx)
 	if err != nil {
 		return nil, err
 	}
-	f.updateIndex(configs)
-	return configs, nil
+	names := make([]string, 0, len(s.configs))
+	for name := range s.configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]santa.Config, 0, len(names))
+	for _, name := range names {
+		result = append(result, s.configs[name])
+	}
+	return result, nil
 }
 
+// Config returns an immutable snapshot value. Callers must not mutate its slices
+// or pointer fields. No disk access or global write lock is needed after startup.
 func (f *FileRepo) Config(ctx context.Context, machineID string) (santa.Config, error) {
-	f.mtx.Lock()
-	defer f.mtx.Unlock()
-
-	var conf santa.Config
-	configs, err := loadConfigs(f.configPath)
+	s, err := f.loaded(ctx)
 	if err != nil {
-		return conf, errors.Wrapf(err, "loading config for machineID %q", machineID)
+		return santa.Config{}, err
 	}
-	f.updateIndex(configs)
-	conf, ok := f.configIndex[machineID]
+	c, ok := s.configs[machineID]
 	if !ok {
-		return conf, errors.Errorf("configuration %q not found", machineID)
+		return c, fmt.Errorf("configuration %q not found", machineID)
 	}
-	return conf, nil
-}
-
-func loadConfigs(path string) ([]santa.Config, error) {
-	var configs []santa.Config
-	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if filepath.Ext(info.Name()) != ".toml" {
-			return nil
-		}
-		file, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			var conf santa.Config
-			err := toml.Unmarshal(file, &conf)
-			if err != nil {
-				return errors.Wrapf(err, "failed to decode %v, skipping \n", info.Name())
-			}
-			name := info.Name()
-			conf.MachineID = strings.TrimSuffix(name, filepath.Ext(name))
-			configs = append(configs, conf)
-			return nil
-		}
-		return nil
-	})
-	return configs, errors.Wrapf(err, "loading configs from path")
+	return c, nil
 }
