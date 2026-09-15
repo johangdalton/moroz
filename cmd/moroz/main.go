@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -45,9 +45,13 @@ The latest version of santa is available on the github repo page:
 
 // How long a shutdown waits for in-flight Santa requests. Reload errors are
 // repeated in the log at most this often while the text stays the same.
+// Credential, known-devices and identity files are polled for changes at
+// credentialPollInterval.
 const (
-	shutdownGrace       = 15 * time.Second
-	reloadErrorInterval = 5 * time.Minute
+	shutdownGrace          = 15 * time.Second
+	reloadErrorInterval    = 5 * time.Minute
+	credentialPollInterval = 2 * time.Second
+	defaultIdentityStore   = "<outbox-dir>/../identities.json"
 )
 
 func main() {
@@ -65,6 +69,10 @@ func serve() int {
 		flStandalone           = flag.Bool("standalone", false, "Explicitly serve without manager telemetry (local tests or standalone use)")
 		flEventRetention       = flag.Int("event-retention-days", 90, "Retention for dated event JSONL files")
 		flClientCredentials    = flag.String("client-credentials", env.String("MOROZ_CLIENT_CREDENTIALS", ""), "JSON file mapping allowed machine IDs to individual bearer tokens")
+		flFleetCredentials     = flag.String("fleet-credentials", env.String("MOROZ_FLEET_CREDENTIALS", ""), "JSON file with named fleet-wide bearer tokens accepted for any machine ID; empty disables")
+		flIdentityStore        = flag.String("identity-store", env.String("MOROZ_IDENTITY_STORE", defaultIdentityStore), "JSON file binding each machine ID to the serial number it first reported; empty disables")
+		flKnownDevices         = flag.String("known-devices", env.String("MOROZ_KNOWN_DEVICES", ""), "JSON allowlist of machine IDs (with optional serial) written by the manager; empty disables")
+		flRequireKnownDevices  = flag.Bool("require-known-devices", false, "Accept fleet tokens only for machine IDs in the known-devices file while it is loaded")
 		flAllowUnauthenticated = flag.Bool("allow-unauthenticated", false, "allow unauthenticated requests for isolated synthetic tests only")
 		flRateBurst            = flag.Int("client-rate-burst", 30, "Requests a machine may make at once before the per-machine limit returns 429; 0 disables")
 		flRateRefill           = flag.Duration("client-rate-refill", 20*time.Second, "Interval at which each machine earns one more request")
@@ -85,26 +93,26 @@ func serve() int {
 		fmt.Fprintln(os.Stderr, "event retention must be positive")
 		return 2
 	}
-	var credentials map[string]string
-	if *flClientCredentials != "" {
-		data, err := os.ReadFile(*flClientCredentials)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "cannot read client credentials:", err)
+	var credentials *moroz.Credentials
+	if *flClientCredentials != "" || *flFleetCredentials != "" {
+		// Both files must exist and validate at startup; later reloads keep
+		// the previous set on error.
+		var err error
+		if credentials, err = moroz.LoadCredentials(*flClientCredentials, *flFleetCredentials); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			return 2
-		}
-		if err := json.Unmarshal(data, &credentials); err != nil || credentials == nil {
-			fmt.Fprintln(os.Stderr, "invalid client credentials file")
-			return 2
-		}
-		for _, token := range credentials {
-			if len(token) < 32 {
-				fmt.Fprintln(os.Stderr, "client tokens must contain at least 32 characters")
-				return 2
-			}
 		}
 	} else if !*flAllowUnauthenticated && !*flVersion {
 		fmt.Fprintln(os.Stderr, "client credentials are required; development mode must be explicitly enabled for isolated tests")
 		return 2
+	}
+	if *flRequireKnownDevices && *flKnownDevices == "" {
+		fmt.Fprintln(os.Stderr, "require-known-devices needs a known-devices file")
+		return 2
+	}
+	identityPath := *flIdentityStore
+	if identityPath == defaultIdentityStore {
+		identityPath = filepath.Clean(filepath.Join(*flOutbox, "..", "identities.json"))
 	}
 
 	if *flVersion {
@@ -152,6 +160,29 @@ func serve() int {
 	go repo.Watch(reloadCtx, time.Second, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
 		level.Error(logger).Log("msg", "policy reload failed; retaining previous snapshot", "err", err, "repeats_suppressed", repeats)
 	}))
+	if credentials != nil {
+		go credentials.Watch(reloadCtx, credentialPollInterval, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
+			level.Error(logger).Log("msg", "credential reload failed; retaining previous set", "err", err, "repeats_suppressed", repeats)
+		}))
+	}
+	var identities *moroz.IdentityStore
+	if identityPath != "" {
+		// Never fatal: losing bindings must not take rule delivery down.
+		identities = moroz.OpenIdentityStore(identityPath)
+		for _, warning := range identities.Warnings() {
+			level.Error(logger).Log("msg", "CORRUPT IDENTITY STORE; all machines will rebind on their next preflight", "path", identityPath, "detail", warning)
+		}
+	}
+	var knownDevices *moroz.KnownDevices
+	if *flKnownDevices != "" {
+		knownDevices = moroz.NewKnownDevices(*flKnownDevices)
+		if err := knownDevices.Reload(); err != nil {
+			level.Warn(logger).Log("msg", "known-devices not loaded", "path", *flKnownDevices, "err", err)
+		}
+		go knownDevices.Watch(reloadCtx, credentialPollInterval, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
+			level.Error(logger).Log("msg", "known-devices reload failed", "err", err, "repeats_suppressed", repeats)
+		}))
+	}
 	var svc moroz.Service
 	{
 		s, err := moroz.NewService(repo, *flEvents, *flPersistEvents)
@@ -162,6 +193,11 @@ func serve() int {
 		s.SetOutbox(outbox)
 		s.SetLogger(logger)
 		s.SetEventRetentionDays(*flEventRetention)
+		s.SetIdentityStore(identities)
+		s.SetKnownDevices(knownDevices, *flRequireKnownDevices)
+		s.SetAuthErrorLogger(santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
+			level.Error(logger).Log("msg", "preflight refused", "err", err, "repeats_suppressed", repeats)
+		}))
 		svc = s
 		svc = moroz.LoggingMiddleware(logger, *flLogPayloads)(svc)
 	}
@@ -173,15 +209,24 @@ func serve() int {
 		limiter = moroz.NewRateLimiter(*flRateBurst, *flRateRefill, *flMaxConcurrent)
 	}
 	r := mux.NewRouter()
-	r.Use(moroz.ClientGuard(credentials, limiter))
+	r.Use(moroz.Guard(moroz.GuardOptions{Credentials: credentials, Limiter: limiter, KnownDevices: knownDevices, RequireKnownDevices: *flRequireKnownDevices}))
 	moroz.AddHTTPRoutes(r, endpoints, logger)
 	// The health route sits outside ClientGuard: no credentials, no body, no
 	// rate limit. The ingress only forwards the Santa POST routes.
 	root := http.NewServeMux()
-	root.Handle("/healthz", moroz.HealthHandler(repo, outbox))
+	root.Handle("/healthz", moroz.HealthHandler(repo, outbox, moroz.AuthStatus{Credentials: credentials, Identities: identities, KnownDevices: knownDevices}))
 	root.Handle("/", r)
 
 	var g run.Group
+	if identities != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		g.Add(func() error {
+			identities.Run(ctx, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
+				level.Error(logger).Log("msg", "identity store", "err", err, "repeats_suppressed", repeats)
+			}))
+			return nil
+		}, func(error) { cancel() })
+	}
 	if outbox != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		g.Add(func() error {

@@ -100,6 +100,7 @@ func (mw logmw) RuleDownload(ctx context.Context, machineID string) (rules []san
 		_ = mw.logger.Log(
 			"method", "RuleDownload",
 			"machine_id", machineID,
+			"auth", AuthFromContext(ctx),
 			"err", err,
 			"took", time.Since(begin),
 		)

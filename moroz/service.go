@@ -2,6 +2,7 @@ package moroz
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
 
@@ -28,7 +29,38 @@ type SantaService struct {
 	repo               ConfigStore
 	eventDir           string
 	flPersistEvents    bool
+	identities         *IdentityStore
+	known              *KnownDevices
+	requireKnown       bool
+	authError          func(error)
 }
+
+// SetIdentityStore enables machine ID to serial binding at preflight. Called
+// during startup before serving requests.
+func (svc *SantaService) SetIdentityStore(s *IdentityStore) { svc.identities = s }
+
+// SetKnownDevices enables the preflight serial check of fleet-authenticated
+// machines against the allowlist when require is set.
+func (svc *SantaService) SetKnownDevices(k *KnownDevices, require bool) {
+	svc.known, svc.requireKnown = k, require
+}
+
+// SetAuthErrorLogger receives identity and allowlist refusals; the caller
+// throttles them. Called during startup before serving requests.
+func (svc *SantaService) SetAuthErrorLogger(fn func(error)) { svc.authError = fn }
+
+func (svc *SantaService) reportAuthError(err error) {
+	if svc.authError != nil {
+		svc.authError(err)
+	}
+}
+
+// unknownDeviceError refuses a fleet-authenticated preflight whose machine
+// is not in the known-devices allowlist or reports another serial.
+type unknownDeviceError struct{}
+
+func (e unknownDeviceError) Error() string   { return "unknown device" }
+func (e unknownDeviceError) StatusCode() int { return http.StatusForbidden }
 
 func NewService(ds ConfigStore, eventDir string, flPersistEvents bool) (*SantaService, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

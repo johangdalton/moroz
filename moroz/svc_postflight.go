@@ -57,6 +57,7 @@ func (mw logmw) Postflight(ctx context.Context, machineID string, p santa.Postfl
 		keyvals := []interface{}{
 			"method", "Postflight",
 			"machine_id", machineID,
+			"auth", AuthFromContext(ctx),
 			"sync_type", textOf(p.SyncType),
 			"rules_received", p.RulesReceived,
 			"rules_processed", p.RulesProcessed,

@@ -111,8 +111,132 @@ acknowledging Santa, retries delivery until the manager commits it, and recovers
 after restarts. The queue defaults to 1 GiB / 50,000 batches; full queues return
 503, pending batches never expire, and only one process may use a queue directory.
 An explicitly configured empty client-credentials JSON object starts with all
-clients denied; null or malformed files fail startup. The internal service token must be random and at least 32 characters; it is not a
+clients denied; null or malformed files fail startup. Add
+`-fleet-credentials=/run/secrets/fleet_credentials` for shared fleet tokens,
+`-known-devices=/config/known-devices.json -require-known-devices` to restrict
+them to devices the manager knows, and `-identity-store=` (empty) to disable
+serial binding; see "Client authentication" below. The internal service token must be random and at least 32 characters; it is not a
 client credential. Use TLS for client access and cross-host manager connections.
+
+# Client authentication
+
+Every Santa route (`/v1/santa/*/{machine_id}`) requires a bearer token. Two
+kinds are accepted, checked in this order:
+
+1. **Per-machine token** from `-client-credentials` (JSON `{"<machine_id>":
+   "<token>"}`): only valid for its own machine ID. Unchanged from earlier
+   releases.
+2. **Fleet token** from `-fleet-credentials` (optional): shared by every
+   managed Mac through one MDM profile. Identity then comes from the machine
+   ID in the URL plus the serial binding described below.
+
+All candidates are compared in constant time. The method is written to each
+request log line as `auth=machine` or `auth=fleet:<name>`; token values are
+never logged. Both files are polled every 2 seconds for a size, mtime or
+inode change (replace by rename or edit in place), validated and swapped in
+atomically. Adding a device or rotating a token needs no restart. Invalid
+content keeps the previous set and is logged (throttled to one line per five
+minutes). At startup both files must exist and validate, or startup fails.
+
+## Fleet credentials file
+
+```json
+{
+  "tokens": [
+    {"name": "pilot-2026", "token": "<random, at least 32 characters>",
+     "disabled": false, "expires": "2027-08-31T00:00:00Z"}
+  ]
+}
+```
+
+`disabled` and `expires` (RFC 3339) are optional. Names are unique, 1-64
+characters of letters, digits, `_`, `.` or `-`. Tokens are at least 32
+characters and unique across fleet tokens and per-machine tokens. Unknown
+keys (for example `disable`) reject the whole file. A fleet-only deployment
+may omit `-client-credentials`.
+
+### Rotation
+
+1. Add a new entry (`pilot-2027`) next to the old one and replace the file.
+   `/healthz` lists it within two seconds.
+2. Push the MDM profile with the new token to the fleet.
+3. Watch `auth.fleet_tokens[].last_used` and `uses` on `/healthz`: once the
+   old token stops being used (allow for offline Macs), set `"disabled": true`
+   on it.
+4. After a grace period remove the entry. A disabled or expired token is
+   refused with 401 like an unknown one.
+
+## Machine identity binding
+
+`-identity-store` (default `<outbox-dir>/../identities.json`, that is
+`/var/log/moroz/identities.json` in the pilot; empty disables) binds each
+machine ID to the serial number it reports in its first authenticated
+preflight (trust on first use). Later preflights with the same serial update
+`last_seen` and `last_auth`; a preflight with a different serial is refused
+with `403 {"error":"identity mismatch"}`, starts no sync session, increments
+`auth.identity_mismatches` on `/healthz` and is logged with both serials
+(throttled). A preflight without a serial is accepted but not bound.
+
+The store is written with temp+fsync+rename, at most once per second. At
+startup a corrupt store is moved to `identities.json.corrupt-<timestamp>`,
+logged loudly and a fresh store starts; this is never fatal. To reset a
+binding (for example a logic board swap that kept the hardware UUID), remove
+the machine's entry from the file and replace the file atomically:
+
+```sh
+jq 'del(.machines["<machine_id>"])' identities.json > identities.json.new \
+  && mv identities.json.new identities.json
+```
+
+The server adopts the edited file within a second; the next preflight binds
+the new serial. Edits within the same second as a server write may be
+overwritten, so verify the entry is gone (or restart the server).
+
+## Known-devices allowlist
+
+`-known-devices=PATH` (optional) reads a manager-written JSON file
+`{"<machine_id>": {"serial": "<serial>", "name": "<display name>"}}` from the
+read-only `/config` volume, with the same hot reload. A missing file turns
+the feature off (logged once); an invalid file keeps the previous list.
+With `-require-known-devices`, fleet-token authentication is accepted only
+for machine IDs in the loaded file (403 `unknown device` otherwise), and at
+preflight an entry with a non-empty `serial` must equal the reported serial.
+Rule download, postflight and event upload only need the machine to have
+authenticated. Per-machine tokens are never subject to this check.
+
+## Security model
+
+A fleet token sits in an MDM profile and is readable by the local user of
+any managed Mac, so it proves only that a request comes from a device that
+received the profile. It does not identify the device: identity comes from
+the machine ID in the URL bound to the serial number reported at first
+preflight, optionally cross-checked against the manager's known-devices list.
+A stolen fleet token lets an attacker impersonate an unenrolled machine ID
+(which then receives the global policy) or replay the identity of a known
+machine only if they also know its serial; it does not let them change rules.
+Rotate fleet tokens on a schedule and immediately when a Mac leaves
+management.
+
+Everything a client reports (hostname, serial, rule counts, events) is
+untrusted input from the same local user: the server validates shape and
+size, binds the serial once, and forwards the rest as telemetry for operators
+to read with that in mind. Per-machine tokens remain the stronger option for
+high-value machines and keep working alongside fleet tokens.
+
+## Health
+
+`GET /healthz` (no credentials, not forwarded by the ingress) reports the
+policy generation, outbox depth and an `auth` block:
+
+```json
+"auth": {"machine_tokens": 2,
+         "fleet_tokens": [{"name": "pilot-2026", "enabled": true,
+                           "last_used": "2026-09-15T18:00:00Z", "uses": 41}],
+         "identities": 2, "identity_mismatches": 0, "known_devices": null}
+```
+
+`known_devices` is `null` while no allowlist is loaded. Counters are kept in
+memory and reset on restart. Token values are never included.
 
 Without a manager, explicitly select `-standalone`. In that mode `-persist-events`
 (default true) writes dated JSONL files under `-event-dir`; it does not update the

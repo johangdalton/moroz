@@ -98,7 +98,7 @@ func decodeEventUpload(ctx context.Context, r *http.Request) (interface{}, error
 
 func (mw logmw) UploadEvent(ctx context.Context, machineID string, events []santa.EventPayload) (err error) {
 	defer func(begin time.Time) {
-		_ = mw.logger.Log("method", "UploadEvent", "machine_id", machineID,
+		_ = mw.logger.Log("method", "UploadEvent", "machine_id", machineID, "auth", AuthFromContext(ctx),
 			"event_count", len(events), "err", err, "took", time.Since(begin))
 	}(time.Now())
 

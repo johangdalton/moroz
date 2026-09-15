@@ -3,7 +3,6 @@ package moroz
 import (
 	"compress/gzip"
 	"compress/zlib"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +31,27 @@ func validMachine(id string) bool {
 // pass nil credentials only through the CLI's explicit development-mode flag.
 // A nil limiter disables per-machine rate and global concurrency limits.
 func ClientGuard(credentials map[string]string, limiter *RateLimiter) func(http.Handler) http.Handler {
+	var creds *Credentials
+	if credentials != nil {
+		creds = staticCredentials(credentials)
+	}
+	return Guard(GuardOptions{Credentials: creds, Limiter: limiter})
+}
+
+// GuardOptions configures Guard. Nil Credentials disable authentication
+// (development mode only). KnownDevices with RequireKnownDevices restricts
+// fleet-token authentication to machine IDs listed in a loaded allowlist;
+// per-machine tokens are never subject to it.
+type GuardOptions struct {
+	Credentials         *Credentials
+	Limiter             *RateLimiter
+	KnownDevices        *KnownDevices
+	RequireKnownDevices bool
+}
+
+// Guard authenticates every Santa route, records the AuthMethod on the
+// request context and applies the request limits.
+func Guard(o GuardOptions) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, err := machineIDFromRequest(r)
@@ -39,14 +59,23 @@ func ClientGuard(credentials map[string]string, limiter *RateLimiter) func(http.
 				http.Error(w, "invalid machine ID", http.StatusBadRequest)
 				return
 			}
-			if credentials != nil {
-				expected, ok := credentials[id]
-				supplied := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-				if !ok || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(expected), []byte(supplied)) != 1 {
+			method := AuthNone
+			if o.Credentials != nil {
+				var ok bool
+				method, ok = o.Credentials.Authenticate(id, r.Header.Get("Authorization"))
+				if !ok {
 					http.Error(w, "invalid client credentials", http.StatusUnauthorized)
 					return
 				}
+				if method.IsFleet() && o.RequireKnownDevices && o.KnownDevices.Loaded() {
+					if _, known := o.KnownDevices.Lookup(id); !known {
+						http.Error(w, "unknown device", http.StatusForbidden)
+						return
+					}
+				}
 			}
+			r = r.WithContext(withAuth(r.Context(), method))
+			limiter := o.Limiter
 			if limiter != nil {
 				// Limits apply only after authentication so they are keyed on
 				// a provisioned machine, never on attacker-chosen input.

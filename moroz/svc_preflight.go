@@ -2,6 +2,7 @@ package moroz
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -11,6 +12,10 @@ import (
 )
 
 func (svc *SantaService) Preflight(ctx context.Context, machineID string, p santa.PreflightPayload) (*santa.Preflight, error) {
+	if err := svc.checkIdentity(ctx, machineID, p.SerialNumber); err != nil {
+		// No session, no telemetry: nothing this client reports is trusted.
+		return nil, err
+	}
 	config, err := svc.config(ctx, machineID)
 	if err != nil {
 		return nil, err
@@ -24,6 +29,33 @@ func (svc *SantaService) Preflight(ctx context.Context, machineID string, p sant
 	}
 	pre := svc.beginSync(machineID, config, p.RequestCleanSync)
 	return &pre, nil
+}
+
+// checkIdentity applies the known-devices serial check to fleet-authenticated
+// machines and then the trust-on-first-use serial binding. The refusal
+// details, including both serials, go to the throttled auth error log only.
+func (svc *SantaService) checkIdentity(ctx context.Context, machineID, serial string) error {
+	auth := AuthFromContext(ctx)
+	if svc.requireKnown && auth.IsFleet() && svc.known.Loaded() {
+		device, ok := svc.known.Lookup(machineID)
+		if !ok {
+			svc.reportAuthError(fmt.Errorf("machine %s authenticated with %s but is not in known-devices", machineID, auth))
+			return unknownDeviceError{}
+		}
+		if device.Serial != "" && device.Serial != serial {
+			svc.reportAuthError(fmt.Errorf("machine %s (%s) reported serial %q but known-devices lists %q", machineID, auth, serial, device.Serial))
+			return unknownDeviceError{}
+		}
+	}
+	if svc.identities != nil {
+		if err := svc.identities.Bind(machineID, serial, auth, time.Now()); err != nil {
+			if mismatch, ok := err.(identityMismatchError); ok {
+				svc.reportAuthError(fmt.Errorf("identity mismatch for machine %s (%s): bound serial %q, preflight serial %q; delete its entry from the identity store to rebind", machineID, auth, mismatch.bound, mismatch.reported))
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 type preflightRequest struct {
@@ -71,6 +103,7 @@ func (mw logmw) Preflight(ctx context.Context, machineID string, p santa.Preflig
 		keyvals := []interface{}{
 			"method", "Preflight",
 			"machine_id", machineID,
+			"auth", AuthFromContext(ctx),
 			"santa_version", p.SantaVersion,
 			"client_mode", textOf(p.ClientMode),
 			"request_clean_sync", p.RequestCleanSync,
