@@ -2,6 +2,9 @@
 package santa
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/pkg/errors"
 )
 
@@ -13,18 +16,30 @@ type Config struct {
 	Rules []Rule `toml:"rules"`
 }
 
-// Rule is a Santa rule.
-// https://github.com/google/santa/blob/ff0efe952b2456b52fad2a40e6eedb0931e6bdf7/docs/development/sync-protocol.md#rules-objects
+// Rule is a Santa rule, mirroring santa.sync.v1.Rule.
+// https://github.com/northpolesec/protos/blob/main/sync/v1.proto
 type Rule struct {
-	RuleType              RuleType `json:"rule_type" toml:"rule_type"`
-	Policy                Policy   `json:"policy" toml:"policy"`
-	Identifier            string   `json:"identifier" toml:"identifier"`
-	CustomMessage         string   `json:"custom_msg,omitempty" toml:"custom_msg,omitempty"`
-	CustomUrl             string   `json:"custom_url,omitempty" toml:"custom_url,omitempty"`
-	FileBundleBinaryCount *int     `json:"file_bundle_binary_count,omitempty" toml:"file_bundle_binary_count,omitempty"`
-	FileBundleHash        *string  `json:"file_bundle_hash,omitempty" toml:"file_bundle_hash,omitempty"`
-	DeprecatedSHA256      *string  `json:"deprecated_sha256,omitempty" toml:"deprecated_sha256,omitempty"`
+	RuleType   RuleType `json:"rule_type" toml:"rule_type"`
+	Policy     Policy   `json:"policy" toml:"policy"`
+	Identifier string   `json:"identifier" toml:"identifier"`
+	// CustomMessage and CustomUrl override the block dialog text and "Open"
+	// button URL; EventDetailButtonLabel (at most 48 characters) overrides the
+	// button label.
+	CustomMessage          string `json:"custom_msg,omitempty" toml:"custom_msg,omitempty"`
+	CustomUrl              string `json:"custom_url,omitempty" toml:"custom_url,omitempty"`
+	EventDetailButtonLabel string `json:"event_detail_button_label,omitempty" toml:"event_detail_button_label,omitempty"`
+	// NotificationAppName makes Santa show an "<app> is now allowed"
+	// notification; Santa ignores it during a CLEAN sync.
+	NotificationAppName string `json:"notification_app_name,omitempty" toml:"notification_app_name,omitempty"`
+	// CelExpr is required for, and only used by, rules with policy CEL.
+	CelExpr               string  `json:"cel_expr,omitempty" toml:"cel_expr,omitempty"`
+	FileBundleBinaryCount *int    `json:"file_bundle_binary_count,omitempty" toml:"file_bundle_binary_count,omitempty"`
+	FileBundleHash        *string `json:"file_bundle_hash,omitempty" toml:"file_bundle_hash,omitempty"`
+	DeprecatedSHA256      *string `json:"deprecated_sha256,omitempty" toml:"deprecated_sha256,omitempty"`
 }
+
+// MaxEventDetailButtonLabel is Santa's limit for Rule.EventDetailButtonLabel.
+const MaxEventDetailButtonLabel = 48
 
 // Preflight represents sync response sent to a Santa client by the sync server.
 // https://github.com/google/santa/blob/344a35aaf63c24a56f7a021ce18ecab090584da3/docs/development/sync-protocol.md#preflight-response
@@ -39,14 +54,19 @@ type Preflight struct {
 	PushNotificationGlobalRuleSyncDeadlineSeconds int      `json:"push_notification_global_rule_sync_deadline" toml:"push_notification_global_rule_sync_deadline_seconds,omitempty"`
 
 	// File-system policy
-	BlockedPathRegex         string               `json:"blocked_path_regex,omitempty" toml:"blocked_path_regex,omitempty"`
-	AllowedPathRegex         string               `json:"allowed_path_regex,omitempty" toml:"allowed_path_regex,omitempty"`
-	BlockUSBMount            bool                 `json:"block_usb_mount" toml:"block_usb_mount,omitempty"`
-	RemountUSBMode           []string             `json:"remount_usb_mode,omitempty" toml:"remount_usb_mode,omitempty"`
-	OverrideFileAccessAction FileAccessAction     `json:"override_file_access_action,omitempty" toml:"override_file_access_action,omitempty"`
-	EventDetailURL           string               `json:"event_detail_url,omitempty" toml:"event_detail_url,omitempty"`
-	EventDetailText          string               `json:"event_detail_text,omitempty" toml:"event_detail_text,omitempty"`
-	ExportConfiguration      *ExportConfiguration `json:"export_configuration,omitempty" toml:"export_configuration,omitempty"`
+	BlockedPathRegex string   `json:"blocked_path_regex,omitempty" toml:"blocked_path_regex,omitempty"`
+	AllowedPathRegex string   `json:"allowed_path_regex,omitempty" toml:"allowed_path_regex,omitempty"`
+	BlockUSBMount    bool     `json:"block_usb_mount" toml:"block_usb_mount,omitempty"`
+	RemountUSBMode   []string `json:"remount_usb_mode,omitempty" toml:"remount_usb_mode,omitempty"`
+	// RemovableMediaPolicy supersedes block_usb_mount/remount_usb_mode, which
+	// Santa only consults when it is unset. EncryptedRemovableMediaPolicy
+	// overrides it for encrypted volumes.
+	RemovableMediaPolicy          *RemovableMediaPolicy `json:"removable_media_policy,omitempty" toml:"removable_media_policy,omitempty"`
+	EncryptedRemovableMediaPolicy *RemovableMediaPolicy `json:"encrypted_removable_media_policy,omitempty" toml:"encrypted_removable_media_policy,omitempty"`
+	OverrideFileAccessAction      FileAccessAction      `json:"override_file_access_action,omitempty" toml:"override_file_access_action,omitempty"`
+	EventDetailURL                string                `json:"event_detail_url,omitempty" toml:"event_detail_url,omitempty"`
+	EventDetailText               string                `json:"event_detail_text,omitempty" toml:"event_detail_text,omitempty"`
+	ExportConfiguration           *ExportConfiguration  `json:"export_configuration,omitempty" toml:"export_configuration,omitempty"`
 
 	// Event upload controls
 	EnableAllEventUpload      bool `json:"enable_all_event_upload" toml:"enable_all_event_upload"`
@@ -87,6 +107,12 @@ type PreflightPayload struct {
 	CdHashRuleCount       int        `json:"cdhash_rule_count"`
 	ClientMode            ClientMode `json:"client_mode"`
 	RequestCleanSync      bool       `json:"request_clean_sync"`
+	// RulesHash is Santa's xxhash128 over its non-transitive rules; the server
+	// forwards it as telemetry and never interprets it.
+	RulesHash            string   `json:"rules_hash,omitempty"`
+	PushNotificationSync bool     `json:"push_notification_sync,omitempty"`
+	SIPStatus            *uint32  `json:"sip_status,omitempty"`
+	PrimaryUserGroups    []string `json:"primary_user_groups,omitempty"`
 	// Optional self-reported policy hints (pass-through)
 	BlockedPathRegex          string           `json:"blocked_path_regex,omitempty"`
 	AllowedPathRegex          string           `json:"allowed_path_regex,omitempty"`
@@ -110,6 +136,14 @@ type PostflightPayload struct {
 	SyncType       SyncType `json:"sync_type,omitempty"`
 	RulesReceived  int      `json:"rules_received"`
 	RulesProcessed int      `json:"rules_processed"`
+	RulesHash      string   `json:"rules_hash,omitempty"`
+}
+
+// TotalRuleCount sums every rule count a preflight reports. Zero with rules
+// on the server means the client database is empty or was reset.
+func (p PreflightPayload) TotalRuleCount() int {
+	return p.BinaryRuleCount + p.CertificateRuleCount + p.CompilerRuleCount + p.TransitiveRuleCount +
+		p.TeamIDRuleCount + p.SigningIDRuleCount + p.CdHashRuleCount
 }
 
 // ExportConfiguration encapsulates export destinations Santa can push data to.
@@ -172,6 +206,15 @@ type EventUploadEvent struct {
 	SigningID                    string         `json:"signing_id"`
 	TeamID                       string         `json:"team_id"`
 	CdHash                       string         `json:"cdhash"`
+	// Identity fields forwarded verbatim (v1.proto Event 29-34). EntitlementInfo
+	// is passed through as the JSON object Santa sent
+	// ({"entitlements_filtered":bool,"entitlements":[{"key","value"}]}).
+	EntitlementInfo   json.RawMessage `json:"entitlement_info,omitempty"`
+	CsFlags           uint32          `json:"cs_flags,omitempty"`
+	SigningStatus     string          `json:"signing_status,omitempty"`
+	SecureSigningTime uint32          `json:"secure_signing_time,omitempty"`
+	SigningTime       uint32          `json:"signing_time,omitempty"`
+	StaticRule        bool            `json:"static_rule,omitempty"`
 }
 
 // SigningEntry is optionally present when an event includes a binary that is signed
@@ -269,6 +312,8 @@ const (
 	SilentBlocklist
 	Remove
 	Cel
+	SilentGuiBlocklist
+	SilentTtyBlocklist
 )
 
 func (p *Policy) UnmarshalText(text []byte) error {
@@ -285,6 +330,10 @@ func (p *Policy) UnmarshalText(text []byte) error {
 		*p = Remove
 	case "CEL":
 		*p = Cel
+	case "SILENT_GUI_BLOCKLIST":
+		*p = SilentGuiBlocklist
+	case "SILENT_TTY_BLOCKLIST":
+		*p = SilentTtyBlocklist
 	case "POLICY_UNKNOWN":
 		*p = PolicyUnknown
 	// Backward-compat aliases
@@ -318,6 +367,10 @@ func (p Policy) MarshalText() ([]byte, error) {
 		return []byte("REMOVE"), nil
 	case Cel:
 		return []byte("CEL"), nil
+	case SilentGuiBlocklist:
+		return []byte("SILENT_GUI_BLOCKLIST"), nil
+	case SilentTtyBlocklist:
+		return []byte("SILENT_TTY_BLOCKLIST"), nil
 	default:
 		return nil, errors.Errorf("unknown policy %d", p)
 	}
@@ -326,9 +379,13 @@ func (p Policy) MarshalText() ([]byte, error) {
 // ClientMode specifies which mode the Santa client will evaluate rules in.
 type ClientMode int
 
+// The zero value is MONITOR, so a config without client_mode stays in monitor
+// mode. STANDALONE lets the local user approve blocked executions by
+// authenticating; Santa then reports CLEAN_STANDALONE syncs.
 const (
 	Monitor ClientMode = iota
 	Lockdown
+	Standalone
 )
 
 func (c *ClientMode) UnmarshalText(text []byte) error {
@@ -337,6 +394,8 @@ func (c *ClientMode) UnmarshalText(text []byte) error {
 		*c = Monitor
 	case "LOCKDOWN":
 		*c = Lockdown
+	case "STANDALONE":
+		*c = Standalone
 	default:
 		return errors.Errorf("unknown client_mode value %q", mode)
 	}
@@ -349,6 +408,8 @@ func (c ClientMode) MarshalText() ([]byte, error) {
 		return []byte("MONITOR"), nil
 	case Lockdown:
 		return []byte("LOCKDOWN"), nil
+	case Standalone:
+		return []byte("STANDALONE"), nil
 	default:
 		return nil, errors.Errorf("unknown client_mode %d", c)
 	}
@@ -362,18 +423,32 @@ const (
 	SyncTypeNormal
 	SyncTypeClean
 	SyncTypeCleanAll
+	SyncTypeCleanStandalone
+	SyncTypeCleanRules
+	SyncTypeCleanFileAccessRules
 )
+
+// IsClean reports whether the type deletes previously received execution rules.
+func (s SyncType) IsClean() bool {
+	return s == SyncTypeClean || s == SyncTypeCleanAll || s == SyncTypeCleanRules
+}
 
 func (s *SyncType) UnmarshalText(text []byte) error {
 	switch t := string(text); t {
 	case "", "SYNC_TYPE_UNSPECIFIED":
 		*s = SyncTypeUnspecified
-	case "NORMAL":
+	case "NORMAL", "normal":
 		*s = SyncTypeNormal
-	case "CLEAN":
+	case "CLEAN", "clean":
 		*s = SyncTypeClean
-	case "CLEAN_ALL":
+	case "CLEAN_ALL", "clean_all":
 		*s = SyncTypeCleanAll
+	case "CLEAN_STANDALONE":
+		*s = SyncTypeCleanStandalone
+	case "CLEAN_RULES":
+		*s = SyncTypeCleanRules
+	case "CLEAN_FILE_ACCESS_RULES":
+		*s = SyncTypeCleanFileAccessRules
 	default:
 		return errors.Errorf("unknown sync_type value %q", t)
 	}
@@ -390,6 +465,12 @@ func (s SyncType) MarshalText() ([]byte, error) {
 		return []byte("CLEAN"), nil
 	case SyncTypeCleanAll:
 		return []byte("CLEAN_ALL"), nil
+	case SyncTypeCleanStandalone:
+		return []byte("CLEAN_STANDALONE"), nil
+	case SyncTypeCleanRules:
+		return []byte("CLEAN_RULES"), nil
+	case SyncTypeCleanFileAccessRules:
+		return []byte("CLEAN_FILE_ACCESS_RULES"), nil
 	default:
 		return nil, errors.Errorf("unknown sync_type %d", s)
 	}
@@ -434,4 +515,150 @@ func (a FileAccessAction) MarshalText() ([]byte, error) {
 	default:
 		return nil, errors.Errorf("unknown override_file_access_action %d", a)
 	}
+}
+
+// RemovableMediaAction selects the arm of santa.sync.v1.RemovableMediaPolicy's
+// oneof. In TOML it is written as action = "ALLOW" | "BLOCK" | "REMOUNT".
+type RemovableMediaAction int
+
+const (
+	RemovableMediaUnspecified RemovableMediaAction = iota
+	RemovableMediaAllow
+	RemovableMediaBlock
+	RemovableMediaRemount
+)
+
+func (a *RemovableMediaAction) UnmarshalText(text []byte) error {
+	switch t := string(text); t {
+	case "":
+		*a = RemovableMediaUnspecified
+	case "ALLOW":
+		*a = RemovableMediaAllow
+	case "BLOCK":
+		*a = RemovableMediaBlock
+	case "REMOUNT":
+		*a = RemovableMediaRemount
+	default:
+		return errors.Errorf("unknown removable media action %q", t)
+	}
+	return nil
+}
+
+func (a RemovableMediaAction) MarshalText() ([]byte, error) {
+	switch a {
+	case RemovableMediaUnspecified:
+		return []byte(""), nil
+	case RemovableMediaAllow:
+		return []byte("ALLOW"), nil
+	case RemovableMediaBlock:
+		return []byte("BLOCK"), nil
+	case RemovableMediaRemount:
+		return []byte("REMOUNT"), nil
+	default:
+		return nil, errors.Errorf("unknown removable media action %d", a)
+	}
+}
+
+// RemovableMediaPolicy controls how Santa handles removable media mounts. The
+// TOML form is
+//
+//	[removable_media_policy]
+//	action = "REMOUNT"
+//	flags = ["rdonly", "noexec"]
+//
+// and the JSON sent to Santa is the protobuf oneof shape from v1.proto:
+// {"allow":true}, {"block":true} or {"remount":{"flags":["rdonly","noexec"]}}.
+type RemovableMediaPolicy struct {
+	Action RemovableMediaAction `toml:"action"`
+	Flags  []string             `toml:"flags,omitempty"`
+}
+
+type removableMediaJSON struct {
+	Allow   *bool          `json:"allow,omitempty"`
+	Block   *bool          `json:"block,omitempty"`
+	Remount *remountPolicy `json:"remount,omitempty"`
+}
+
+type remountPolicy struct {
+	Flags []string `json:"flags"`
+}
+
+func (p RemovableMediaPolicy) MarshalJSON() ([]byte, error) {
+	yes := true
+	var out removableMediaJSON
+	switch p.Action {
+	case RemovableMediaAllow:
+		out.Allow = &yes
+	case RemovableMediaBlock:
+		out.Block = &yes
+	case RemovableMediaRemount:
+		flags := p.Flags
+		if flags == nil {
+			flags = []string{}
+		}
+		out.Remount = &remountPolicy{Flags: flags}
+	case RemovableMediaUnspecified:
+	default:
+		return nil, fmt.Errorf("unknown removable media action %d", p.Action)
+	}
+	return json.Marshal(out)
+}
+
+func (p *RemovableMediaPolicy) UnmarshalJSON(data []byte) error {
+	var in removableMediaJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*p = RemovableMediaPolicy{}
+	set := 0
+	if in.Allow != nil && *in.Allow {
+		p.Action, set = RemovableMediaAllow, set+1
+	}
+	if in.Block != nil && *in.Block {
+		p.Action, set = RemovableMediaBlock, set+1
+	}
+	if in.Remount != nil {
+		p.Action, p.Flags, set = RemovableMediaRemount, in.Remount.Flags, set+1
+	}
+	if set > 1 {
+		return fmt.Errorf("removable media policy sets more than one action")
+	}
+	return nil
+}
+
+// Validate rejects a policy Santa would not apply as written.
+func (p *RemovableMediaPolicy) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.Action == RemovableMediaUnspecified {
+		return fmt.Errorf("removable media policy needs action ALLOW, BLOCK or REMOUNT")
+	}
+	if p.Action != RemovableMediaRemount && len(p.Flags) > 0 {
+		return fmt.Errorf("removable media flags are only used with action REMOUNT")
+	}
+	return nil
+}
+
+// ValidateRule checks the optional rule fields that Santa limits or requires.
+// Identifier formats are validated by the configuration loader.
+func ValidateRule(r Rule) error {
+	if len(r.EventDetailButtonLabel) > MaxEventDetailButtonLabel {
+		return fmt.Errorf("event_detail_button_label exceeds %d characters", MaxEventDetailButtonLabel)
+	}
+	if r.Policy == Cel && r.CelExpr == "" {
+		return fmt.Errorf("policy CEL requires cel_expr")
+	}
+	return nil
+}
+
+// Validate checks the preflight-level fields of a configuration.
+func (p Preflight) Validate() error {
+	if err := p.RemovableMediaPolicy.Validate(); err != nil {
+		return fmt.Errorf("removable_media_policy: %w", err)
+	}
+	if err := p.EncryptedRemovableMediaPolicy.Validate(); err != nil {
+		return fmt.Errorf("encrypted_removable_media_policy: %w", err)
+	}
+	return nil
 }

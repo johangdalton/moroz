@@ -16,7 +16,7 @@ func (svc *SantaService) Preflight(ctx context.Context, machineID string, p sant
 		// No session, no telemetry: nothing this client reports is trusted.
 		return nil, err
 	}
-	config, err := svc.config(ctx, machineID)
+	config, generation, err := svc.effectiveConfig(ctx, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -27,8 +27,18 @@ func (svc *SantaService) Preflight(ctx context.Context, machineID string, p sant
 			level.Warn(svc.logger).Log("msg", "preflight telemetry dropped; rule delivery continues", "machine_id", machineID, "err", err)
 		}
 	}
-	pre := svc.beginSync(machineID, config, p.RequestCleanSync)
+	pre := svc.beginSync(ctx, machineID, config, generation, p)
 	return &pre, nil
+}
+
+// effectiveConfig returns the machine's config and, when the repository
+// tracks generations, the generation id it belongs to.
+func (svc *SantaService) effectiveConfig(ctx context.Context, machineID string) (santa.Config, string, error) {
+	if store, ok := svc.repo.(GenerationStore); ok {
+		return store.EffectiveConfig(ctx, machineID)
+	}
+	config, err := svc.config(ctx, machineID)
+	return config, "", err
 }
 
 // checkIdentity applies the known-devices serial check to fleet-authenticated
@@ -107,6 +117,7 @@ func (mw logmw) Preflight(ctx context.Context, machineID string, p santa.Preflig
 			"santa_version", p.SantaVersion,
 			"client_mode", textOf(p.ClientMode),
 			"request_clean_sync", p.RequestCleanSync,
+			"rules_hash", p.RulesHash,
 			"binary_rules", p.BinaryRuleCount,
 			"certificate_rules", p.CertificateRuleCount,
 			"compiler_rules", p.CompilerRuleCount,

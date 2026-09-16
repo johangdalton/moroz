@@ -31,7 +31,7 @@ func TestHealthEndpoint(t *testing.T) {
 	svc, _ := fixtureService(t)
 	svc.SetOutbox(q)
 	root := http.NewServeMux()
-	root.Handle("/healthz", HealthHandler(policy, q, AuthStatus{}))
+	root.Handle("/healthz", HealthHandler(policy, q, AuthStatus{}, svc))
 	api := mux.NewRouter()
 	api.Use(ClientGuard(map[string]string{}, nil))
 	AddHTTPRoutes(api, MakeServerEndpoints(svc), log.NewNopLogger())
@@ -69,7 +69,7 @@ func TestHealthEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	root.Handle("/healthz-full", HealthHandler(policy, q, AuthStatus{}))
+	root.Handle("/healthz-full", HealthHandler(policy, q, AuthStatus{}, svc))
 	r := httptest.NewRequest(http.MethodGet, "/healthz-full", nil)
 	w := httptest.NewRecorder()
 	root.ServeHTTP(w, r)
@@ -85,7 +85,7 @@ func TestHealthEndpoint(t *testing.T) {
 	if w.Code == 200 {
 		t.Fatal("API route served without credentials")
 	}
-	root.Handle("/healthz-unloaded", HealthHandler(fixturePolicy{}, nil, AuthStatus{}))
+	root.Handle("/healthz-unloaded", HealthHandler(fixturePolicy{}, nil, AuthStatus{}, nil))
 	r = httptest.NewRequest(http.MethodGet, "/healthz-unloaded", nil)
 	w = httptest.NewRecorder()
 	root.ServeHTTP(w, r)

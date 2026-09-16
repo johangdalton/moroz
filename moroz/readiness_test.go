@@ -104,7 +104,8 @@ func TestRequestEncodingAndDecompressionLimit(t *testing.T) {
 
 func TestSnapshotPinnedUntilPostflight(t *testing.T) {
 	svc, store := fixtureService(t)
-	first := svc.beginSync("mac-a", store.config, false)
+	ctx := context.Background()
+	first := svc.beginSync(ctx, "mac-a", store.config, "", santa.PreflightPayload{})
 	if !first.CleanSync {
 		t.Fatal("initial snapshot must clean stale rules")
 	}
@@ -115,17 +116,17 @@ func TestSnapshotPinnedUntilPostflight(t *testing.T) {
 	if !ok || pinned.Preflight.BatchSize == 51 {
 		t.Fatal("in-flight snapshot changed")
 	}
-	svc.finishSync("mac-a")
-	same := svc.beginSync("mac-a", pinned, false)
+	svc.finishSync("mac-a", santa.PostflightPayload{})
+	same := svc.beginSync(ctx, "mac-a", pinned, "", santa.PreflightPayload{})
 	if same.CleanSync || same.SyncType != santa.SyncTypeNormal {
 		t.Fatal("unchanged policy should use normal sync")
 	}
-	next := svc.beginSync("mac-a", changed, false)
+	next := svc.beginSync(ctx, "mac-a", changed, "", santa.PreflightPayload{})
 	if !next.CleanSync {
 		t.Fatal("changed policy should clean stale rules")
 	}
-	svc.finishSync("mac-a")
-	forced := svc.beginSync("mac-a", changed, true)
+	svc.finishSync("mac-a", santa.PostflightPayload{})
+	forced := svc.beginSync(ctx, "mac-a", changed, "", santa.PreflightPayload{RequestCleanSync: true})
 	if !forced.CleanSync {
 		t.Fatal("client clean request ignored")
 	}

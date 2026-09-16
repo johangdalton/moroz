@@ -60,8 +60,12 @@ custom_msg = "allow google chrome signing id"
 
 Acceptable values for client mode:
 ```
-MONITOR | LOCKDOWN
+MONITOR | LOCKDOWN | STANDALONE
 ```
+
+`STANDALONE` lets the local user approve a blocked execution by
+authenticating (Touch ID or password); Santa then creates a local rule and
+reports `CLEAN_STANDALONE` syncs. A missing `client_mode` means `MONITOR`.
 
 Values for `rule_type`, with the `identifier` format each one requires:
 ```
@@ -72,14 +76,45 @@ TEAMID      | 10 uppercase letters or digits, e.g. EQHXZ8M8AV
 SIGNINGID   | TEAMID:signing.id or platform:signing.id
 ```
 
-Values for `policy`:
+Values for `policy` (the full `santa.sync.v1.Policy` set):
 ```
-BLOCKLIST | SILENT_BLOCKLIST | ALLOWLIST | ALLOWLIST_COMPILER | REMOVE
+ALLOWLIST | ALLOWLIST_COMPILER | BLOCKLIST | SILENT_BLOCKLIST |
+SILENT_GUI_BLOCKLIST | SILENT_TTY_BLOCKLIST | CEL | REMOVE
 ```
 
 Every rule needs `rule_type`, `policy` and `identifier`. A config file with an
 unknown key (for example `sha256 =` instead of `identifier =`) or a malformed
 identifier is rejected as a whole and the previously loaded policy stays active.
+
+Optional rule keys, all passed to Santa under the same JSON name:
+
+| TOML / JSON key | Meaning |
+|---|---|
+| `custom_msg` | Text of the block dialog for BLOCK rules |
+| `custom_url` | URL behind the dialog's "Open" button (same `%{...}` placeholders as `event_detail_url`) |
+| `event_detail_button_label` | Label of that button, at most 48 characters (validated) |
+| `notification_app_name` | Shows an "*name* is now allowed" notification; Santa ignores it during a CLEAN sync |
+| `cel_expr` | CEL expression, required for and only used by `policy = "CEL"` (validated) |
+| `file_bundle_hash`, `file_bundle_binary_count` | Deprecated predecessors of `notification_app_name` |
+
+Preflight-level keys added for the v1 vocabulary (see `santa/santa.go` for the
+complete list, including `event_detail_url`, `event_detail_text` and the
+deprecated `block_usb_mount` / `remount_usb_mode`, which Santa only consults
+when `removable_media_policy` is unset):
+
+```toml
+[removable_media_policy]            # baseline for all removable media
+action = "REMOUNT"                  # ALLOW | BLOCK | REMOUNT
+flags = ["rdonly", "noexec"]        # REMOUNT only
+
+[encrypted_removable_media_policy]  # optional override for encrypted volumes
+action = "ALLOW"
+```
+
+On the wire this becomes the protobuf oneof shape from `sync/v1.proto`:
+`"removable_media_policy": {"remount": {"flags": ["rdonly", "noexec"]}}`,
+`{"allow": true}` or `{"block": true}`. A policy table without a valid
+`action`, or with `flags` on a non-REMOUNT action, rejects the file.
 
 Use the `santactl` command to get the sha256 value: 
 ```bash
@@ -115,7 +150,9 @@ clients denied; null or malformed files fail startup. Add
 `-fleet-credentials=/run/secrets/fleet_credentials` for shared fleet tokens,
 `-known-devices=/config/known-devices.json -require-known-devices` to restrict
 them to devices the manager knows, and `-identity-store=` (empty) to disable
-serial binding; see "Client authentication" below. The internal service token must be random and at least 32 characters; it is not a
+serial binding; see "Client authentication" below. `-incremental-sync` turns
+policy changes into NORMAL syncs carrying only the diff, and `-ack-store`
+places the acknowledgements file; see "Sync decisions" below. The internal service token must be random and at least 32 characters; it is not a
 client credential. Use TLS for client access and cross-host manager connections.
 
 # Client authentication
@@ -237,6 +274,157 @@ policy generation, outbox depth and an `auth` block:
 
 `known_devices` is `null` while no allowlist is loaded. Counters are kept in
 memory and reset on restart. Token values are never included.
+
+A `sync` block reports the acknowledgement store and the sync decisions made
+since startup (see "Sync decisions" below):
+
+```json
+"sync": {"acknowledgements": 412, "incremental_sync": true,
+         "clean": 17, "normal_diff": 38, "normal_unchanged": 2890,
+         "last_decision": "normal-unchanged", "invalid_events_skipped": 0}
+```
+
+# Sync decisions and acknowledgements
+
+At every preflight the server decides whether the machine gets a `CLEAN`
+sync (Santa drops all non-transitive rules it received before and applies the
+full list) or a `NORMAL` sync (rules are applied on top of what the machine
+has). The decision, its reason and the rule count are logged on one line:
+
+```
+msg="sync decision" machine_id=... sync_decision=clean|normal-diff|normal-unchanged reason=... sync_type=CLEAN|NORMAL rules=N generation=G previous_generation=P
+```
+
+## Acknowledgements file
+
+`-ack-store` (default `<outbox-dir>/../acknowledged.json`, that is
+`/var/log/moroz/acknowledged.json` in the pilot; empty keeps it in memory)
+records, per machine, the policy it confirmed at postflight:
+
+```json
+{"version": 1, "machines": {"<machine_id>": {
+  "machine_id": "<machine_id>", "generation": "<manifest generation id>",
+  "config_digest": "<sha256 of the machine's effective config>",
+  "sync_type": "CLEAN", "rules_hash": "<as reported by Santa>",
+  "acknowledged_at": "2026-09-16T12:00:00Z", "last_clean_at": "2026-09-16T12:00:00Z"}}}
+```
+
+An acknowledgement is recorded only when the postflight reports
+`rules_received == rules_processed` for a session the server still has; an
+incomplete sync leaves the previous entry, so the next sync is CLEAN again.
+The file is written like the identity store (temp+fsync+rename, at most once
+per second, corrupt files quarantined to `acknowledged.json.corrupt-<ts>` and
+logged loudly, never fatal). Because it survives restarts, a server restart
+no longer forces a CLEAN sync on every machine. To force one machine to
+CLEAN, delete its entry and replace the file atomically (as for identities);
+deleting the file forces the whole fleet once.
+
+## Decision rules
+
+Checked in this order; the first match wins. Rules 1-4 are safety nets that
+apply whether or not `-incremental-sync` is set.
+
+1. `request_clean_sync` in the preflight → `clean`, `reason=client_requested`.
+2. No acknowledgement for the machine (first contact, store reset, or the
+   last sync was incomplete) → `clean`, `reason=no_acknowledgement`.
+3. Dithered periodic clean: the machine's last completed CLEAN is older than
+   `7 + (sha256(machine_id) mod 11)` days (7-17 days, fixed per machine, so
+   the fleet does not clean on the same day) → `clean`, `reason=periodic`.
+4. Zero-rule sanity: the preflight reports zero rules across *all* count
+   fields (binary, certificate, compiler, transitive, cdhash, teamid,
+   signingid) while the server has rules for the machine → `clean`,
+   `reason=zero_rules_reported`.
+5. The acknowledged config digest equals the current one →
+   `normal-unchanged`, `reason=digest_unchanged`. With the flag off the
+   full list is still served (historic behaviour); with the flag on the
+   rule download is empty.
+6. Flag off: `clean`, `reason=policy_changed`, full list with the TOML's
+   `sync_type` passed through unchanged (today's behaviour).
+7. Flag on, policy changed: the server loads the machine's effective config
+   in the acknowledged generation from `generations/<G_prev>/` (its own
+   file, else that generation's `global.toml`), checks that its digest still
+   matches the acknowledgement, and diffs it against the current one:
+   * rules in G_prev but not in G_cur → `policy = "REMOVE"` with the same
+     `rule_type` and `identifier` (emitted first);
+   * rules added or changed in any field (policy, custom_msg, custom_url,
+     cel_expr, ...) → emitted exactly as in G_cur, in G_cur order;
+   * unchanged rules → not sent.
+   Result: `normal-diff`, `reason=generation_changed`, or
+   `normal-unchanged`, `reason=rules_unchanged` when only preflight settings
+   changed. Fallbacks to `clean` with the full list: the repository has no
+   generations or the acknowledgement predates them
+   (`generation_unknown`), the previous generation directory was pruned or
+   fails validation (`previous_generation_unavailable`), its content no
+   longer matches the acknowledged digest (`previous_generation_mismatch`),
+   the same generation id was rewritten (`generation_reused`), or the diff
+   is not smaller than the full list (`diff_larger_than_full`).
+
+The rule download serves whatever the preflight decided, pinned for 15
+minutes; without a session (expired, or a restart between preflight and rule
+download) it serves the current full list.
+
+## Interaction with the manager's `sync_type`
+
+The manager currently writes `sync_type = "CLEAN"` into every TOML. With
+`-incremental-sync` **off** (default) the TOML value passes through except
+where the rules above override it: an unchanged digest yields `NORMAL`, and
+rules 1-4 force `CLEAN`. With the flag **on** the TOML's `sync_type` is
+ignored for the decision: the server is the only party deciding between
+`CLEAN` and `NORMAL`, and every other preflight key passes through
+unchanged. `clean_sync` (deprecated boolean) always mirrors the decision.
+
+Flags: `-incremental-sync` (default `false`, env `MOROZ_INCREMENTAL_SYNC`),
+`-ack-store` (default `<outbox-dir>/../acknowledged.json`, env
+`MOROZ_ACK_STORE`).
+
+# Telemetry envelopes
+
+Every batch posted to the manager has the envelope `{"version": 1, "id":
+"<32 hex>", "kind": "preflight" | "events" | "postflight", "machine_id":
+"...", "received_at": "<RFC 3339 nano>", ...}` with one body field named after
+the kind.
+
+`preflight` carries Santa's preflight request verbatim (minus the push
+token), now including `rules_hash`, `push_notification_sync`, `sip_status`
+and `primary_user_groups` when Santa sends them.
+
+`events` carries `"events": [...]`, each event with Santa's own JSON names.
+In addition to the fields forwarded before (file_sha256, file_path,
+file_name, executing_user, execution_time, logged_in_users,
+current_sessions, decision, file_bundle_id/path/executable_rel_path/name/
+version/version_string/hash/hash_millis/binary_count, pid, ppid,
+parent_name, team_id, signing_id, cdhash, quarantine_*, signing_chain
+`[{sha256, cn, org, ou, valid_from, valid_until}]`) the envelope now also
+carries, when present: `entitlement_info` (Santa's object, passed through as
+JSON), `cs_flags` (uint32), `signing_status` (string, e.g.
+`SIGNING_STATUS_PRODUCTION`), `signing_time` and `secure_signing_time`
+(uint32 seconds), `static_rule` (bool). Limits applied per event: strings
+1024 bytes, `signing_chain` 10 entries, `logged_in_users` /
+`current_sessions` 32 entries, `entitlement_info` 16 KiB (replaced by
+`{"entitlements_filtered":true}` beyond that). Events with a malformed
+`file_sha256` are skipped and counted (`sync.invalid_events_skipped` on
+`/healthz`) instead of failing the batch with 400.
+
+`postflight` is new:
+
+```json
+{"version": 1, "id": "...", "kind": "postflight", "machine_id": "...", "received_at": "...",
+ "postflight": {
+   "rules_received": 4, "rules_processed": 4,
+   "sync_type": "CLEAN",                  // as reported by Santa; absent if unspecified
+   "rules_hash": "...", "rules_hash_source": "postflight" | "preflight",
+   "complete": true,                      // rules_received == rules_processed
+   "acknowledged": true,                  // server recorded the generation below
+   "sync_decision": "clean" | "normal-diff" | "normal-unchanged",
+   "served_sync_type": "CLEAN" | "NORMAL", "rules_served": 4,
+   "acknowledged_generation": {"manifest_generation": "<generation id from current.json>",
+                               "config_digest": "<sha256 hex of the machine's effective config>"}}}
+```
+
+`sync_decision`, `served_sync_type`, `rules_served` and
+`acknowledged_generation` are absent when the server has no session for the
+machine (restart or expiry between preflight and postflight). Like preflight
+telemetry, an outbox error never fails the postflight.
 
 Without a manager, explicitly select `-standalone`. In that mode `-persist-events`
 (default true) writes dated JSONL files under `-event-dir`; it does not update the

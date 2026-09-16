@@ -45,11 +45,17 @@ func (a AuthStatus) report(now time.Time) authReport {
 	return r
 }
 
+// SyncStatus reports acknowledgement and sync decision counters.
+type SyncStatus interface {
+	SyncStats() SyncStats
+}
+
 // HealthHandler serves GET /healthz for the container health check. It is
 // registered outside ClientGuard, needs no credentials and never reads the
 // request body. The ingress only forwards Santa's POST routes, so it stays
-// internal. A nil outbox (standalone mode) reports zero pending batches.
-func HealthHandler(policy PolicyStatus, outbox *Outbox, auth AuthStatus) http.Handler {
+// internal. A nil outbox (standalone mode) reports zero pending batches; a
+// nil sync omits the sync block.
+func HealthHandler(policy PolicyStatus, outbox *Outbox, auth AuthStatus, sync SyncStatus) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -63,7 +69,12 @@ func HealthHandler(policy PolicyStatus, outbox *Outbox, auth AuthStatus) http.Ha
 			Pending    int        `json:"pending"`
 			Dead       int        `json:"dead"`
 			Auth       authReport `json:"auth"`
+			Sync       *SyncStats `json:"sync,omitempty"`
 		}{Status: "ok", Auth: auth.report(time.Now())}
+		if sync != nil {
+			stats := sync.SyncStats()
+			status.Sync = &stats
+		}
 		code := http.StatusOK
 		if generation, loaded := policy.Generation(); loaded {
 			status.Generation = generation

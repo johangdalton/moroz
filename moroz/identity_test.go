@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groob/moroz/santa"
 )
 
 func TestIdentityBindingOnFirstPreflight(t *testing.T) {
@@ -27,12 +29,12 @@ func TestIdentityBindingOnFirstPreflight(t *testing.T) {
 	if w := post(h, "/v1/santa/preflight/mac-a", machineTokenA, `{"serial_num":"C02AAA"}`); w.Code != 200 || store.Count() != 1 {
 		t.Fatalf("%d count=%d", w.Code, store.Count())
 	}
-	svc.finishSync("mac-a")
+	svc.finishSync("mac-a", santa.PostflightPayload{})
 	// Same serial keeps working, also through a fleet token.
 	if w := post(h, "/v1/santa/preflight/mac-a", fleetToken1, `{"serial_num":"C02AAA"}`); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
-	svc.finishSync("mac-a")
+	svc.finishSync("mac-a", santa.PostflightPayload{})
 	w := post(h, "/v1/santa/preflight/mac-a", machineTokenA, `{"serial_num":"C02BBB"}`)
 	if w.Code != 403 {
 		t.Fatalf("mismatch returned %d", w.Code)

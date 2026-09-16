@@ -52,6 +52,7 @@ const (
 	reloadErrorInterval    = 5 * time.Minute
 	credentialPollInterval = 2 * time.Second
 	defaultIdentityStore   = "<outbox-dir>/../identities.json"
+	defaultAckStore        = "<outbox-dir>/../acknowledged.json"
 )
 
 func main() {
@@ -71,6 +72,8 @@ func serve() int {
 		flClientCredentials    = flag.String("client-credentials", env.String("MOROZ_CLIENT_CREDENTIALS", ""), "JSON file mapping allowed machine IDs to individual bearer tokens")
 		flFleetCredentials     = flag.String("fleet-credentials", env.String("MOROZ_FLEET_CREDENTIALS", ""), "JSON file with named fleet-wide bearer tokens accepted for any machine ID; empty disables")
 		flIdentityStore        = flag.String("identity-store", env.String("MOROZ_IDENTITY_STORE", defaultIdentityStore), "JSON file binding each machine ID to the serial number it first reported; empty disables")
+		flAckStore             = flag.String("ack-store", env.String("MOROZ_ACK_STORE", defaultAckStore), "JSON file recording the policy generation each machine acknowledged at postflight; empty keeps it in memory only")
+		flIncrementalSync      = flag.Bool("incremental-sync", env.Bool("MOROZ_INCREMENTAL_SYNC", false), "Serve NORMAL syncs with only the rule diff since the acknowledged generation instead of a CLEAN sync with the full list")
 		flKnownDevices         = flag.String("known-devices", env.String("MOROZ_KNOWN_DEVICES", ""), "JSON allowlist of machine IDs (with optional serial) written by the manager; empty disables")
 		flRequireKnownDevices  = flag.Bool("require-known-devices", false, "Accept fleet tokens only for machine IDs in the known-devices file while it is loaded")
 		flAllowUnauthenticated = flag.Bool("allow-unauthenticated", false, "allow unauthenticated requests for isolated synthetic tests only")
@@ -113,6 +116,10 @@ func serve() int {
 	identityPath := *flIdentityStore
 	if identityPath == defaultIdentityStore {
 		identityPath = filepath.Clean(filepath.Join(*flOutbox, "..", "identities.json"))
+	}
+	ackPath := *flAckStore
+	if ackPath == defaultAckStore {
+		ackPath = filepath.Clean(filepath.Join(*flOutbox, "..", "acknowledged.json"))
 	}
 
 	if *flVersion {
@@ -173,6 +180,12 @@ func serve() int {
 			level.Error(logger).Log("msg", "CORRUPT IDENTITY STORE; all machines will rebind on their next preflight", "path", identityPath, "detail", warning)
 		}
 	}
+	// Never fatal either: without acknowledgements every machine simply gets
+	// one CLEAN sync.
+	acks := moroz.OpenAckStore(ackPath)
+	for _, warning := range acks.Warnings() {
+		level.Error(logger).Log("msg", "CORRUPT ACKNOWLEDGEMENT STORE; all machines will CLEAN sync on their next preflight", "path", ackPath, "detail", warning)
+	}
 	var knownDevices *moroz.KnownDevices
 	if *flKnownDevices != "" {
 		knownDevices = moroz.NewKnownDevices(*flKnownDevices)
@@ -184,16 +197,20 @@ func serve() int {
 		}))
 	}
 	var svc moroz.Service
+	var syncStatus moroz.SyncStatus
 	{
 		s, err := moroz.NewService(repo, *flEvents, *flPersistEvents)
 		if err != nil {
 			level.Error(logger).Log("msg", "cannot load policy", "err", err)
 			return 1
 		}
+		syncStatus = s
 		s.SetOutbox(outbox)
 		s.SetLogger(logger)
 		s.SetEventRetentionDays(*flEventRetention)
 		s.SetIdentityStore(identities)
+		s.SetAckStore(acks)
+		s.SetIncrementalSync(*flIncrementalSync)
 		s.SetKnownDevices(knownDevices, *flRequireKnownDevices)
 		s.SetAuthErrorLogger(santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
 			level.Error(logger).Log("msg", "preflight refused", "err", err, "repeats_suppressed", repeats)
@@ -214,7 +231,7 @@ func serve() int {
 	// The health route sits outside ClientGuard: no credentials, no body, no
 	// rate limit. The ingress only forwards the Santa POST routes.
 	root := http.NewServeMux()
-	root.Handle("/healthz", moroz.HealthHandler(repo, outbox, moroz.AuthStatus{Credentials: credentials, Identities: identities, KnownDevices: knownDevices}))
+	root.Handle("/healthz", moroz.HealthHandler(repo, outbox, moroz.AuthStatus{Credentials: credentials, Identities: identities, KnownDevices: knownDevices}, syncStatus))
 	root.Handle("/", r)
 
 	var g run.Group
@@ -223,6 +240,15 @@ func serve() int {
 		g.Add(func() error {
 			identities.Run(ctx, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
 				level.Error(logger).Log("msg", "identity store", "err", err, "repeats_suppressed", repeats)
+			}))
+			return nil
+		}, func(error) { cancel() })
+	}
+	{
+		ctx, cancel := context.WithCancel(context.Background())
+		g.Add(func() error {
+			acks.Run(ctx, santaconfig.ThrottleErrors(reloadErrorInterval, func(err error, repeats int) {
+				level.Error(logger).Log("msg", "acknowledgement store", "err", err, "repeats_suppressed", repeats)
 			}))
 			return nil
 		}, func(error) { cancel() })

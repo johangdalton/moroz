@@ -19,6 +19,13 @@ clean_sync = true
 deprecated_fcm_full_sync_interval_seconds = 0
 deprecated_fcm_global_rule_sync_deadline_seconds = 0
 
+[removable_media_policy]
+  action = "REMOUNT"
+  flags = ["rdonly", "noexec"]
+
+[encrypted_removable_media_policy]
+  action = "ALLOW"
+
 [export_configuration]
   [export_configuration.signed_post]
     url = "https://storage.example.com/upload"
@@ -93,3 +100,27 @@ deprecated_fcm_global_rule_sync_deadline_seconds = 0
   identifier = "d867fca68bbd7db18e9ced231800e7535bc067852b1e530987bb7f57b5e3a02c"
   custom_msg = "deny go compiler component"
   custom_url = "https://go.dev"
+
+[[rules]]
+  rule_type = "BINARY"
+  policy = "SILENT_GUI_BLOCKLIST"
+  identifier = "1111111111111111111111111111111111111111111111111111111111111111"
+  custom_msg = "block without a GUI dialog"
+  event_detail_button_label = "Request access"
+
+[[rules]]
+  rule_type = "TEAMID"
+  policy = "SILENT_TTY_BLOCKLIST"
+  identifier = "ABCDEFGHIJ"
+
+[[rules]]
+  rule_type = "SIGNINGID"
+  policy = "CEL"
+  identifier = "EQHXZ8M8AV:com.google.Chrome.helper"
+  cel_expr = "target.signing_time >= timestamp('2025-05-01T00:00:00Z')"
+
+[[rules]]
+  rule_type = "TEAMID"
+  policy = "ALLOWLIST"
+  identifier = "BJ4HAAB9B3"
+  notification_app_name = "Zoom"

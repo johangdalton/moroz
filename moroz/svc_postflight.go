@@ -6,11 +6,45 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
+	"github.com/go-kit/kit/log/level"
 	"github.com/groob/moroz/santa"
 )
 
 func (svc *SantaService) Postflight(ctx context.Context, machineID string, p santa.PostflightPayload) (*santa.Postflight, error) {
-	svc.finishSync(machineID)
+	session, acknowledged := svc.finishSync(machineID, p)
+	if !acknowledged {
+		level.Warn(svc.logger).Log("msg", "postflight without acknowledgement; next sync will be CLEAN", "machine_id", machineID,
+			"session", session.decision != "", "rules_received", p.RulesReceived, "rules_processed", p.RulesProcessed)
+	}
+	if svc.outbox != nil {
+		// Best-effort like preflight telemetry: an outbox problem never fails
+		// the postflight, which would make Santa treat the whole sync as failed.
+		report := PostflightTelemetry{
+			RulesReceived:  p.RulesReceived,
+			RulesProcessed: p.RulesProcessed,
+			SyncType:       p.SyncType,
+			RulesHash:      p.RulesHash,
+			Complete:       p.RulesReceived == p.RulesProcessed,
+			Acknowledged:   acknowledged,
+		}
+		if report.RulesHash != "" {
+			report.RulesHashSource = "postflight"
+		} else if session.rulesHash != "" {
+			report.RulesHash, report.RulesHashSource = session.rulesHash, "preflight"
+		}
+		if session.decision != "" {
+			report.SyncDecision = session.decision
+			report.RulesServed = len(session.rules)
+			report.ServedSyncType = santa.SyncTypeNormal
+			if session.clean {
+				report.ServedSyncType = santa.SyncTypeClean
+			}
+			report.AcknowledgedGeneration = &AcknowledgedGeneration{ManifestGeneration: session.generation, ConfigDigest: session.digest}
+		}
+		if err := svc.outbox.Postflight(ctx, machineID, report); err != nil {
+			level.Warn(svc.logger).Log("msg", "postflight telemetry dropped", "machine_id", machineID, "err", err)
+		}
+	}
 	return &santa.Postflight{}, nil
 }
 
@@ -61,6 +95,7 @@ func (mw logmw) Postflight(ctx context.Context, machineID string, p santa.Postfl
 			"sync_type", textOf(p.SyncType),
 			"rules_received", p.RulesReceived,
 			"rules_processed", p.RulesProcessed,
+			"rules_hash", p.RulesHash,
 		}
 		if mw.logPayloads {
 			keyvals = append(keyvals, "postflight_payload", p)

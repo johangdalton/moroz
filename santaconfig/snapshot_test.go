@@ -253,3 +253,114 @@ func TestThrottleErrors(t *testing.T) {
 		t.Fatalf("suppressed counts %v", repeats)
 	}
 }
+
+// publish writes one generation with the given files and points current.json at it.
+func publish(t *testing.T, root, generation string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(root, "generations", generation)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(files))
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	data, _ := json.Marshal(manifest{Version: 1, Generation: generation, Files: names})
+	if err := os.WriteFile(filepath.Join(root, "next.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "next.json"), filepath.Join(root, "current.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestV1VocabularyValidation(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	accepted := []string{
+		"client_mode = \"STANDALONE\"\n[[rules]]\nrule_type = \"BINARY\"\npolicy = \"SILENT_GUI_BLOCKLIST\"\nidentifier = \"" + sha + "\"\nevent_detail_button_label = \"Ask\"\nnotification_app_name = \"App\"\ncustom_url = \"https://help.example\"\n",
+		"client_mode = \"LOCKDOWN\"\n[[rules]]\nrule_type = \"TEAMID\"\npolicy = \"SILENT_TTY_BLOCKLIST\"\nidentifier = \"EQHXZ8M8AV\"\n",
+		"client_mode = \"LOCKDOWN\"\n[[rules]]\nrule_type = \"SIGNINGID\"\npolicy = \"CEL\"\nidentifier = \"EQHXZ8M8AV:com.google.Chrome\"\ncel_expr = \"true\"\n",
+		"client_mode = \"LOCKDOWN\"\n[removable_media_policy]\naction = \"REMOUNT\"\nflags = [\"rdonly\"]\n[encrypted_removable_media_policy]\naction = \"BLOCK\"\n",
+		"client_mode = \"LOCKDOWN\"\nblock_usb_mount = true\nremount_usb_mode = [\"rdonly\"]\n[removable_media_policy]\naction = \"ALLOW\"\n",
+	}
+	for i, body := range accepted {
+		if err := writeLegacy(t, t.TempDir(), body).Reload(context.Background()); err != nil {
+			t.Fatalf("config %d rejected: %v", i, err)
+		}
+	}
+	rejected := map[string]string{
+		"CEL without cel_expr":    "client_mode = \"LOCKDOWN\"\n[[rules]]\nrule_type = \"SIGNINGID\"\npolicy = \"CEL\"\nidentifier = \"EQHXZ8M8AV:com.google.Chrome\"\n",
+		"button label too long":   "client_mode = \"LOCKDOWN\"\n[[rules]]\nrule_type = \"TEAMID\"\npolicy = \"BLOCKLIST\"\nidentifier = \"EQHXZ8M8AV\"\nevent_detail_button_label = \"" + strings.Repeat("x", 49) + "\"\n",
+		"media policy no action":  "client_mode = \"LOCKDOWN\"\n[removable_media_policy]\nflags = [\"rdonly\"]\n",
+		"media policy bad action": "client_mode = \"LOCKDOWN\"\n[removable_media_policy]\naction = \"DENY\"\n",
+		"unknown client mode":     "client_mode = \"KIOSK\"\n",
+	}
+	for name, body := range rejected {
+		if err := writeLegacy(t, t.TempDir(), body).Reload(context.Background()); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestEffectiveAndHistoricConfig(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	global := func(policy string) string {
+		return "client_mode = \"MONITOR\"\n[[rules]]\nrule_type = \"BINARY\"\npolicy = \"" + policy + "\"\nidentifier = \"" + strings.Repeat("a", 64) + "\"\n"
+	}
+	machine := "client_mode = \"LOCKDOWN\"\n[[rules]]\nrule_type = \"TEAMID\"\npolicy = \"ALLOWLIST\"\nidentifier = \"EQHXZ8M8AV\"\n"
+	publish(t, root, "g1", map[string]string{"global.toml": global("BLOCKLIST"), "mac-a.toml": machine})
+	repo := NewFileRepo(root)
+	c, generation, err := repo.EffectiveConfig(ctx, "mac-a")
+	if err != nil || generation != "g1" || c.Rules[0].RuleType != santa.TeamID {
+		t.Fatalf("%v %q %+v", err, generation, c)
+	}
+	c, generation, err = repo.EffectiveConfig(ctx, "mac-b")
+	if err != nil || generation != "g1" || c.MachineID != "global" {
+		t.Fatalf("fallback to global: %v %q %+v", err, generation, c)
+	}
+	// g2 drops the per-machine file; the machine now follows global.
+	publish(t, root, "g2", map[string]string{"global.toml": global("ALLOWLIST")})
+	if err := repo.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c, generation, _ = repo.EffectiveConfig(ctx, "mac-a")
+	if generation != "g2" || c.MachineID != "global" || c.Rules[0].Policy != santa.Allowlist {
+		t.Fatalf("%q %+v", generation, c)
+	}
+	// The previous generation is still readable from disk, per machine.
+	before, err := repo.HistoricConfig(ctx, "g1", "mac-a")
+	if err != nil || before.Rules[0].RuleType != santa.TeamID || before.MachineID != "mac-a" {
+		t.Fatalf("%v %+v", err, before)
+	}
+	before, err = repo.HistoricConfig(ctx, "g1", "mac-b")
+	if err != nil || before.Rules[0].Policy != santa.Blocklist {
+		t.Fatalf("historic global fallback: %v %+v", err, before)
+	}
+	// Cached: deleting the directory does not affect cached entries but fails new ones.
+	if err := os.RemoveAll(filepath.Join(root, "generations", "g1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.HistoricConfig(ctx, "g1", "mac-a"); err != nil {
+		t.Fatalf("cached historic config lost: %v", err)
+	}
+	if _, err := repo.HistoricConfig(ctx, "g1", "mac-c"); err == nil {
+		t.Fatal("pruned generation served")
+	}
+	if _, err := repo.HistoricConfig(ctx, "g0", "mac-a"); err == nil {
+		t.Fatal("unknown generation served")
+	}
+	for _, bad := range [][2]string{{"../g1", "mac-a"}, {"g1", "../../etc"}, {"", "mac-a"}} {
+		if _, err := repo.HistoricConfig(ctx, bad[0], bad[1]); err == nil {
+			t.Fatalf("unsafe name accepted: %v", bad)
+		}
+	}
+	// A legacy directory has no generation.
+	legacy := writeLegacy(t, t.TempDir(), global("BLOCKLIST"))
+	if _, generation, err := legacy.EffectiveConfig(ctx, "mac-a"); err != nil || generation != "" {
+		t.Fatalf("%v %q", err, generation)
+	}
+}

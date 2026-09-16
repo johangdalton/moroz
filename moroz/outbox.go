@@ -32,6 +32,40 @@ type TelemetryBatch struct {
 	ReceivedAt string                   `json:"received_at"`
 	Events     []santa.EventUploadEvent `json:"events,omitempty"`
 	Preflight  *santa.PreflightPayload  `json:"preflight,omitempty"`
+	Postflight *PostflightTelemetry     `json:"postflight,omitempty"`
+}
+
+// PostflightTelemetry is the "postflight" batch body: what Santa reported at
+// the end of a sync, what the server served, and the generation the
+// acknowledgement (if any) refers to.
+type PostflightTelemetry struct {
+	RulesReceived  int            `json:"rules_received"`
+	RulesProcessed int            `json:"rules_processed"`
+	SyncType       santa.SyncType `json:"sync_type,omitempty"` // as reported by Santa
+	RulesHash      string         `json:"rules_hash,omitempty"`
+	// RulesHashSource is "postflight" or "preflight" (fallback), absent if none.
+	RulesHashSource string `json:"rules_hash_source,omitempty"`
+	// Complete is rules_received == rules_processed.
+	Complete bool `json:"complete"`
+	// Acknowledged is true when the server recorded the generation below as
+	// the machine's current policy (a session existed and Complete was true).
+	Acknowledged bool `json:"acknowledged"`
+	// Server-side view of the session; absent when no session was found.
+	SyncDecision           string                  `json:"sync_decision,omitempty"`
+	ServedSyncType         santa.SyncType          `json:"served_sync_type,omitempty"`
+	RulesServed            int                     `json:"rules_served,omitempty"`
+	AcknowledgedGeneration *AcknowledgedGeneration `json:"acknowledged_generation,omitempty"`
+}
+
+// AcknowledgedGeneration names the policy a machine received: the manifest
+// generation id from current.json and the sha256 of its effective config.
+type AcknowledgedGeneration struct {
+	ManifestGeneration string `json:"manifest_generation"`
+	ConfigDigest       string `json:"config_digest"`
+}
+
+func validKind(kind string) bool {
+	return kind == "events" || kind == "preflight" || kind == "postflight"
 }
 
 type queuedBatch struct {
@@ -119,7 +153,7 @@ func validateBatch(data []byte, name string) (TelemetryBatch, error) {
 	if err := json.Unmarshal(data, &batch); err != nil {
 		return batch, err
 	}
-	if batch.Version != 1 || batch.ID != strings.TrimSuffix(name[21:], ".json") || !validMachine(batch.MachineID) || (batch.Kind != "events" && batch.Kind != "preflight") {
+	if batch.Version != 1 || batch.ID != strings.TrimSuffix(name[21:], ".json") || !validMachine(batch.MachineID) || !validKind(batch.Kind) {
 		return batch, fmt.Errorf("batch metadata does not match file name")
 	}
 	return batch, nil
@@ -327,6 +361,9 @@ func (q *Outbox) Preflight(ctx context.Context, machine string, p santa.Prefligh
 	// Push tokens are unrelated to telemetry and are not retained in this queue.
 	p.PushNotificationToken = ""
 	return q.enqueue(ctx, TelemetryBatch{Kind: "preflight", MachineID: machine, Preflight: &p})
+}
+func (q *Outbox) Postflight(ctx context.Context, machine string, p PostflightTelemetry) error {
+	return q.enqueue(ctx, TelemetryBatch{Kind: "postflight", MachineID: machine, Postflight: &p})
 }
 
 // deadLettered reports a batch that was moved aside so delivery can continue.

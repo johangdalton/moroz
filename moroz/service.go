@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/kit/endpoint"
@@ -24,7 +25,11 @@ type SantaService struct {
 	eventRetentionDays int
 	sessionMu          sync.Mutex
 	sessions           map[string]syncSession
-	acknowledged       map[string][32]byte
+	acks               *AckStore
+	incremental        bool
+	now                func() time.Time
+	decisions          syncCounters
+	invalidEvents      atomic.Int64
 	global             santa.Config
 	repo               ConfigStore
 	eventDir           string
@@ -74,7 +79,8 @@ func NewService(ds ConfigStore, eventDir string, flPersistEvents bool) (*SantaSe
 		eventRetentionDays: 90,
 		global:             global,
 		sessions:           make(map[string]syncSession),
-		acknowledged:       make(map[string][32]byte),
+		acks:               OpenAckStore(""),
+		now:                time.Now,
 		repo:               ds,
 		eventDir:           eventDir,
 		flPersistEvents:    flPersistEvents,
@@ -102,6 +108,64 @@ func MakeServerEndpoints(svc Service) Endpoints {
 		EventUploadEndpoint:  makeEventUploadEndpoint(svc),
 		PostflightEndpoint:   makePostflightEndpoint(svc),
 	}
+}
+
+// SetAckStore replaces the in-memory acknowledgement store with a persistent
+// one. Called during startup before serving requests.
+func (svc *SantaService) SetAckStore(s *AckStore) {
+	if s != nil {
+		svc.acks = s
+	}
+}
+
+// SetIncrementalSync enables NORMAL syncs carrying only the rule diff between
+// the acknowledged and the current generation. Called during startup.
+func (svc *SantaService) SetIncrementalSync(enabled bool) { svc.incremental = enabled }
+
+// syncCounters are the in-memory decision counters reported on /healthz.
+type syncCounters struct {
+	clean, normalDiff, normalUnchanged atomic.Int64
+	last                               atomic.Pointer[string]
+}
+
+func (svc *SantaService) countDecision(mode string) {
+	switch mode {
+	case decisionClean:
+		svc.decisions.clean.Add(1)
+	case decisionNormalDiff:
+		svc.decisions.normalDiff.Add(1)
+	case decisionNormalUnchanged:
+		svc.decisions.normalUnchanged.Add(1)
+	}
+	svc.decisions.last.Store(&mode)
+}
+
+// SyncStats is the /healthz view of acknowledgements and sync decisions.
+type SyncStats struct {
+	Acknowledgements     int    `json:"acknowledgements"`
+	IncrementalSync      bool   `json:"incremental_sync"`
+	Clean                int64  `json:"clean"`
+	NormalDiff           int64  `json:"normal_diff"`
+	NormalUnchanged      int64  `json:"normal_unchanged"`
+	LastDecision         string `json:"last_decision,omitempty"`
+	InvalidEventsSkipped int64  `json:"invalid_events_skipped"`
+}
+
+// SyncStats returns the current counters; they reset on restart except the
+// acknowledgement count, which comes from the store.
+func (svc *SantaService) SyncStats() SyncStats {
+	stats := SyncStats{
+		Acknowledgements:     svc.acks.Count(),
+		IncrementalSync:      svc.incremental,
+		Clean:                svc.decisions.clean.Load(),
+		NormalDiff:           svc.decisions.normalDiff.Load(),
+		NormalUnchanged:      svc.decisions.normalUnchanged.Load(),
+		InvalidEventsSkipped: svc.invalidEvents.Load(),
+	}
+	if last := svc.decisions.last.Load(); last != nil {
+		stats.LastDecision = *last
+	}
+	return stats
 }
 
 // SetOutbox is called during startup before serving requests.

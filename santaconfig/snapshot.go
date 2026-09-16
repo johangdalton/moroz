@@ -19,7 +19,10 @@ import (
 
 type snapshot struct {
 	version string
-	configs map[string]santa.Config
+	// generation is the manifest's generation id (the directory under
+	// generations/); empty for legacy directories without current.json.
+	generation string
+	configs    map[string]santa.Config
 }
 
 type manifest struct {
@@ -34,44 +37,46 @@ func validName(name string) bool {
 	return safeName.MatchString(name) && !strings.Contains(name, "..")
 }
 
-func configSource(root string) (string, []string, error) {
+// configSource returns the snapshot version, the manifest generation id
+// (empty for legacy directories) and the policy files to load.
+func configSource(root string) (string, string, []string, error) {
 	content, err := os.ReadFile(filepath.Join(root, "current.json"))
 	if err == nil {
 		var m manifest
 		if err := json.Unmarshal(content, &m); err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		if m.Version != 1 || !validName(m.Generation) {
-			return "", nil, fmt.Errorf("invalid policy manifest")
+			return "", "", nil, fmt.Errorf("invalid policy manifest")
 		}
 		paths := make([]string, 0, len(m.Files))
 		for _, name := range m.Files {
 			if !strings.HasSuffix(name, ".toml") || !validName(strings.TrimSuffix(name, ".toml")) {
-				return "", nil, fmt.Errorf("invalid policy filename %q", name)
+				return "", "", nil, fmt.Errorf("invalid policy filename %q", name)
 			}
 			paths = append(paths, filepath.Join(root, "generations", m.Generation, name))
 		}
-		return fmt.Sprintf("manifest:%x", sha256.Sum256(content)), paths, nil
+		return fmt.Sprintf("manifest:%x", sha256.Sum256(content)), m.Generation, paths, nil
 	}
 	if !os.IsNotExist(err) {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	// Legacy, manually maintained config directories remain supported. Metadata is
 	// checked only by the reload worker, never on the request path.
 	paths, err := filepath.Glob(filepath.Join(root, "*.toml"))
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	sort.Strings(paths)
 	h := sha256.New()
 	for _, path := range paths {
 		stat, err := os.Stat(path)
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		fmt.Fprintf(h, "%s:%d:%d\n", path, stat.Size(), stat.ModTime().UnixNano())
 	}
-	return fmt.Sprintf("legacy:%x", h.Sum(nil)), paths, nil
+	return fmt.Sprintf("legacy:%x", h.Sum(nil)), "", paths, nil
 }
 
 var (
@@ -112,8 +117,51 @@ func validateRules(rules []santa.Rule) error {
 			ruleType, _ := rule.RuleType.MarshalText()
 			return fmt.Errorf("rule %d (%s): identifier %q must be %s", i+1, ruleType, rule.Identifier, expected)
 		}
+		if err := santa.ValidateRule(*rule); err != nil {
+			return fmt.Errorf("rule %d: %w", i+1, err)
+		}
 	}
 	return nil
+}
+
+// loadConfigFile parses and validates one policy file. Unknown keys are an
+// error: a misspelt key would otherwise be dropped silently, for example a
+// rule with "sha256" instead of "identifier" yields an empty identifier.
+func loadConfigFile(path string) (santa.Config, error) {
+	var config santa.Config
+	stat, err := os.Lstat(path)
+	if err != nil {
+		return config, err
+	}
+	if !stat.Mode().IsRegular() {
+		return config, fmt.Errorf("policy is not a regular file: %s", path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return config, err
+	}
+	metadata, err := toml.Decode(string(content), &config)
+	if err != nil {
+		return config, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, key := range undecoded {
+			keys[i] = key.String()
+		}
+		return config, fmt.Errorf("decode %s: unknown keys: %s", path, strings.Join(keys, ", "))
+	}
+	if err := config.Preflight.Validate(); err != nil {
+		return config, fmt.Errorf("validate %s: %w", path, err)
+	}
+	if err := validateRules(config.Rules); err != nil {
+		return config, fmt.Errorf("validate %s: %w", path, err)
+	}
+	config.MachineID = strings.TrimSuffix(filepath.Base(path), ".toml")
+	if !validName(config.MachineID) {
+		return config, fmt.Errorf("invalid machine ID %q", config.MachineID)
+	}
+	return config, nil
 }
 
 // Reload builds a new snapshot separately, then publishes it in one atomic swap.
@@ -121,49 +169,21 @@ func validateRules(rules []santa.Rule) error {
 func (f *FileRepo) Reload(ctx context.Context) error {
 	f.reloadMu.Lock()
 	defer f.reloadMu.Unlock()
-	version, paths, err := configSource(f.configPath)
+	version, generation, paths, err := configSource(f.configPath)
 	if err != nil {
 		return err
 	}
 	if old := f.current.Load(); old != nil && old.version == version {
 		return nil
 	}
-	next := &snapshot{version: version, configs: make(map[string]santa.Config, len(paths))}
+	next := &snapshot{version: version, generation: generation, configs: make(map[string]santa.Config, len(paths))}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		stat, err := os.Lstat(path)
+		config, err := loadConfigFile(path)
 		if err != nil {
 			return err
-		}
-		if !stat.Mode().IsRegular() {
-			return fmt.Errorf("policy is not a regular file: %s", path)
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		var config santa.Config
-		metadata, err := toml.Decode(string(content), &config)
-		if err != nil {
-			return fmt.Errorf("decode %s: %w", path, err)
-		}
-		// A misspelt key would otherwise be dropped silently, for example a
-		// rule with "sha256" instead of "identifier" yields an empty identifier.
-		if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
-			keys := make([]string, len(undecoded))
-			for i, key := range undecoded {
-				keys[i] = key.String()
-			}
-			return fmt.Errorf("decode %s: unknown keys: %s", path, strings.Join(keys, ", "))
-		}
-		if err := validateRules(config.Rules); err != nil {
-			return fmt.Errorf("validate %s: %w", path, err)
-		}
-		config.MachineID = strings.TrimSuffix(filepath.Base(path), ".toml")
-		if !validName(config.MachineID) {
-			return fmt.Errorf("invalid machine ID %q", config.MachineID)
 		}
 		if _, exists := next.configs[config.MachineID]; exists {
 			return fmt.Errorf("duplicate config %q", config.MachineID)

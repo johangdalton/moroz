@@ -272,7 +272,7 @@ func TestHealthAuthBlock(t *testing.T) {
 	if w := post(api, "/v1/santa/preflight/mac-c", fleetToken1, `{"serial_num":"C02OTHER"}`); w.Code != 403 {
 		t.Fatal(w.Code)
 	}
-	health := HealthHandler(fixturePolicy{generation: "g", loaded: true}, nil, AuthStatus{Credentials: creds, Identities: store})
+	health := HealthHandler(fixturePolicy{generation: "g", loaded: true}, nil, AuthStatus{Credentials: creds, Identities: store}, nil)
 	w := httptest.NewRecorder()
 	health.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var body struct {
@@ -311,7 +311,7 @@ func TestHealthAuthBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	w = httptest.NewRecorder()
-	HealthHandler(fixturePolicy{loaded: true}, nil, AuthStatus{KnownDevices: known}).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	HealthHandler(fixturePolicy{loaded: true}, nil, AuthStatus{KnownDevices: known}, nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if !strings.Contains(w.Body.String(), `"known_devices":2`) || !strings.Contains(w.Body.String(), `"fleet_tokens":[]`) {
 		t.Fatalf("%s", w.Body.String())
 	}

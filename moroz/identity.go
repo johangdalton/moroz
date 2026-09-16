@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -150,30 +149,7 @@ func (s *IdentityStore) Flush() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(s.path)
-	file, err := os.CreateTemp(dir, ".identities-")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if _, err = file.Write(append(data, '\n')); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err := os.Chmod(temporary, 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, s.path); err != nil {
-		return err
-	}
-	if err := syncDirectory(dir); err != nil {
+	if err := writeFileAtomic(s.path, ".identities-", append(data, '\n'), 0600); err != nil {
 		return err
 	}
 	s.dirty = false

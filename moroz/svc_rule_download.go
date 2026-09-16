@@ -13,9 +13,13 @@ import (
 	"github.com/groob/moroz/santa"
 )
 
+// RuleDownload serves the rules chosen at preflight: the full list for a
+// CLEAN sync, the diff for an incremental NORMAL sync, nothing when the
+// policy is unchanged. Without a session (expired, or a restart between
+// preflight and rule download) it serves the current full list.
 func (svc *SantaService) RuleDownload(ctx context.Context, machineID string) ([]santa.Rule, error) {
-	if config, ok := svc.sessionConfig(machineID); ok {
-		return config.Rules, nil
+	if session, ok := svc.session(machineID); ok {
+		return session.rules, nil
 	}
 	config, err := svc.config(ctx, machineID)
 	return config.Rules, err
@@ -101,6 +105,7 @@ func (mw logmw) RuleDownload(ctx context.Context, machineID string) (rules []san
 			"method", "RuleDownload",
 			"machine_id", machineID,
 			"auth", AuthFromContext(ctx),
+			"rule_count", len(rules),
 			"err", err,
 			"took", time.Since(begin),
 		)
