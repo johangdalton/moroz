@@ -368,6 +368,46 @@ func TestZeroReportedRulesForcesClean(t *testing.T) {
 	}
 }
 
+func TestRuleCountMismatchForcesClean(t *testing.T) {
+	for _, incremental := range []bool{true, false} {
+		svc, _, logs, now := syncFixture(t, incremental)
+		fullSync(t, svc, "mac-a", santa.PreflightPayload{})
+		// Matching counts: ruleD is a BINARY compiler rule, counted once under
+		// binary and again under compiler; transitive rules are subtracted.
+		for _, p := range []santa.PreflightPayload{populated, {BinaryRuleCount: 2, CompilerRuleCount: 1, TeamIDRuleCount: 1, SigningIDRuleCount: 1},
+			{BinaryRuleCount: 5, TransitiveRuleCount: 3, TeamIDRuleCount: 1, SigningIDRuleCount: 1}} {
+			*now = now.Add(2 * time.Hour)
+			if pre, _ := fullSync(t, svc, "mac-a", p); pre.SyncType != santa.SyncTypeNormal {
+				t.Fatalf("incremental=%v: %+v forced %+v", incremental, p, pre)
+			}
+		}
+		// One rule missing (or one extra) forces a CLEAN with the full list...
+		missing := santa.PreflightPayload{BinaryRuleCount: 2, TeamIDRuleCount: 1}
+		pre, rules := fullSync(t, svc, "mac-a", missing)
+		if mode, reason := lastDecision(t, logs); pre.SyncType != santa.SyncTypeClean || len(rules) != 4 || mode != decisionClean || reason != "rule_count_mismatch" {
+			t.Fatalf("incremental=%v: %+v %d %s %s", incremental, pre, len(rules), mode, reason)
+		}
+		// ...but at most once an hour while the mismatch persists.
+		*now = now.Add(59 * time.Minute)
+		if pre, _ = fullSync(t, svc, "mac-a", missing); pre.SyncType != santa.SyncTypeNormal {
+			t.Fatalf("incremental=%v: backoff ignored: %+v", incremental, pre)
+		}
+		*now = now.Add(time.Minute)
+		extra := santa.PreflightPayload{BinaryRuleCount: 2, TeamIDRuleCount: 2, SigningIDRuleCount: 1}
+		if pre, _ = fullSync(t, svc, "mac-a", extra); pre.SyncType != santa.SyncTypeClean {
+			t.Fatalf("incremental=%v: extra rule not cleaned: %+v", incremental, pre)
+		}
+	}
+}
+
+func TestExpectedRules(t *testing.T) {
+	removeB := rule(santa.TeamID, santa.Remove, ruleB.Identifier, "")
+	duplicateA := rule(santa.Binary, santa.Blocklist, ruleA.Identifier, "")
+	if n := expectedRules([]santa.Rule{ruleA, ruleB, duplicateA, removeB, ruleE}); n != 2 {
+		t.Fatalf("got %d", n)
+	}
+}
+
 func TestIncompletePostflightIsNotAcknowledged(t *testing.T) {
 	svc, _, logs, _ := syncFixture(t, true)
 	ctx := context.Background()

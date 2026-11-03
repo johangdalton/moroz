@@ -317,3 +317,40 @@ func testConfig(t *testing.T, path string, replace bool) Config {
 
 	return conf
 }
+
+// Santa 2026.7 sends fields without a json_name in lowerCamelCase (captured
+// from the pilot fleet on 2026-11-03); both spellings must decode.
+func TestCamelCaseFieldsFromSanta(t *testing.T) {
+	var pre PreflightPayload
+	if err := json.Unmarshal([]byte(`{"binary_rule_count":2,"teamid_rule_count":28,"signingid_rule_count":16,"machine_id":"M","sipStatus":7,"rulesHash":"54bdb898e9041a2398cd59b3fabff886"}`), &pre); err != nil {
+		t.Fatal(err)
+	}
+	if pre.RulesHash != "54bdb898e9041a2398cd59b3fabff886" || pre.SIPStatus == nil || *pre.SIPStatus != 7 || pre.TotalRuleCount() != 46 {
+		t.Fatalf("%+v", pre)
+	}
+	var post PostflightPayload
+	if err := json.Unmarshal([]byte(`{"rules_received":46,"rules_processed":46,"machine_id":"M","syncType":"NORMAL","rulesHash":"54bdb898e9041a2398cd59b3fabff886"}`), &post); err != nil {
+		t.Fatal(err)
+	}
+	if post.SyncType != SyncTypeNormal || post.RulesHash != "54bdb898e9041a2398cd59b3fabff886" || post.RulesProcessed != 46 {
+		t.Fatalf("%+v", post)
+	}
+	var snake PostflightPayload
+	if err := json.Unmarshal([]byte(`{"sync_type":"CLEAN","rules_hash":"a","rulesHash":"b"}`), &snake); err != nil {
+		t.Fatal(err)
+	}
+	if snake.SyncType != SyncTypeClean || snake.RulesHash != "a" {
+		t.Fatalf("snake_case did not win: %+v", snake)
+	}
+	var ev EventUploadEvent
+	if err := json.Unmarshal([]byte(`{"file_sha256":"x","signingStatus":"SIGNING_STATUS_PRODUCTION","csFlags":5,"signingTime":1,"secureSigningTime":2,"entitlementInfo":{"entitlements":[]}}`), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.SigningStatus != "SIGNING_STATUS_PRODUCTION" || ev.CsFlags != 5 || ev.SigningTime != 1 || ev.SecureSigningTime != 2 || len(ev.EntitlementInfo) == 0 {
+		t.Fatalf("%+v", ev)
+	}
+	out, _ := json.Marshal(ev)
+	if !strings.Contains(string(out), `"signing_status":"SIGNING_STATUS_PRODUCTION"`) {
+		t.Fatalf("forwarded under the wrong name: %s", out)
+	}
+}

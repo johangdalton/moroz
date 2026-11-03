@@ -35,6 +35,36 @@ const (
 // sessionTTL bounds how long a preflight's pinned snapshot is served.
 const sessionTTL = 15 * time.Minute
 
+// mismatchCleanBackoff limits rule_count_mismatch CLEAN syncs to one per
+// machine per hour, so a rule Santa keeps rejecting cannot force a CLEAN on
+// every sync.
+const mismatchCleanBackoff = time.Hour
+
+// reportedRules is the number of server-delivered execution rules in the
+// client's database. Santa counts BINARY, CERTIFICATE, TEAMID, SIGNINGID and
+// CDHASH rules by type and transitive rules by state (they are also one of
+// those types); compiler_rule_count is a state count that overlaps the type
+// counts and is left out (SNTRuleTable.mm, Santa 2026.7).
+func reportedRules(p santa.PreflightPayload) int {
+	return p.BinaryRuleCount + p.CertificateRuleCount + p.TeamIDRuleCount + p.SigningIDRuleCount + p.CdHashRuleCount - p.TransitiveRuleCount
+}
+
+// expectedRules is the number of rules Santa keeps after applying rules:
+// one per rule_type + identifier, the last entry winning, REMOVE dropping it.
+func expectedRules(rules []santa.Rule) int {
+	effective := make(map[ruleKey]bool, len(rules))
+	for _, r := range rules {
+		effective[ruleKey{r.RuleType, r.Identifier}] = r.Policy != santa.Remove
+	}
+	n := 0
+	for _, kept := range effective {
+		if kept {
+			n++
+		}
+	}
+	return n
+}
+
 // syncSession pins the snapshot chosen at preflight until postflight so a
 // policy publish in the middle of a sync cannot mix generations.
 type syncSession struct {
@@ -66,7 +96,8 @@ func configDigest(config santa.Config) string {
 
 // decide chooses between CLEAN and NORMAL for this preflight. The safety nets
 // (client request, no acknowledgement, periodic dithered CLEAN, zero reported
-// rules) apply regardless of the incremental-sync flag. With the flag off a
+// rules, a reported rule count that differs from the acknowledged policy)
+// apply regardless of the incremental-sync flag. With the flag off a
 // changed policy is always a CLEAN sync with the full list, and an unchanged
 // one a NORMAL sync with the full list (historic passthrough). With the flag
 // on the TOML's sync_type is ignored and a changed policy becomes a NORMAL
@@ -88,6 +119,9 @@ func (svc *SantaService) decide(ctx context.Context, machine string, config sant
 		return full
 	case p.TotalRuleCount() == 0 && len(config.Rules) > 0:
 		full.reason = "zero_rules_reported"
+		return full
+	case previous.ConfigDigest == digest && reportedRules(p) != expectedRules(config.Rules) && now.Sub(previous.LastCleanAt) >= mismatchCleanBackoff:
+		full.reason = "rule_count_mismatch"
 		return full
 	case previous.ConfigDigest == digest:
 		unchanged := syncDecision{mode: decisionNormalUnchanged, reason: "digest_unchanged", previousGeneration: previous.Generation}

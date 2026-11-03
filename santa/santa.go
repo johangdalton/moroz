@@ -146,6 +146,60 @@ func (p PreflightPayload) TotalRuleCount() int {
 		p.TeamIDRuleCount + p.SigningIDRuleCount + p.CdHashRuleCount
 }
 
+// Santa encodes v1.proto fields that have an explicit json_name in snake_case
+// and the rest in protobuf's lowerCamelCase: 2026.7 sends "rulesHash" and
+// "syncType", not "rules_hash" and "sync_type". These tables accept both
+// spellings for every request field of v1.proto that lacks a json_name.
+var (
+	preflightAliases  = map[string]string{"sipStatus": "sip_status", "rulesHash": "rules_hash"}
+	postflightAliases = map[string]string{"syncType": "sync_type", "rulesHash": "rules_hash"}
+	eventAliases      = map[string]string{"entitlementInfo": "entitlement_info", "csFlags": "cs_flags", "signingStatus": "signing_status",
+		"secureSigningTime": "secure_signing_time", "signingTime": "signing_time"}
+)
+
+// renameKeys rewrites each camelCase key of a JSON object to its snake_case
+// name. A key already present in snake_case wins.
+func renameKeys(data []byte, aliases map[string]string) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return data, err
+	}
+	renamed := false
+	for camel, snake := range aliases {
+		value, ok := fields[camel]
+		if !ok {
+			continue
+		}
+		delete(fields, camel)
+		if _, exists := fields[snake]; !exists {
+			fields[snake] = value
+		}
+		renamed = true
+	}
+	if !renamed {
+		return data, nil
+	}
+	return json.Marshal(fields)
+}
+
+func (p *PreflightPayload) UnmarshalJSON(data []byte) error {
+	type plain PreflightPayload
+	data, err := renameKeys(data, preflightAliases)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, (*plain)(p))
+}
+
+func (p *PostflightPayload) UnmarshalJSON(data []byte) error {
+	type plain PostflightPayload
+	data, err := renameKeys(data, postflightAliases)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, (*plain)(p))
+}
+
 // ExportConfiguration encapsulates export destinations Santa can push data to.
 type ExportConfiguration struct {
 	SignedPost *SignedPost `json:"signed_post,omitempty" toml:"signed_post,omitempty"`
@@ -215,6 +269,15 @@ type EventUploadEvent struct {
 	SecureSigningTime uint32          `json:"secure_signing_time,omitempty"`
 	SigningTime       uint32          `json:"signing_time,omitempty"`
 	StaticRule        bool            `json:"static_rule,omitempty"`
+}
+
+func (e *EventUploadEvent) UnmarshalJSON(data []byte) error {
+	type plain EventUploadEvent
+	data, err := renameKeys(data, eventAliases)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, (*plain)(e))
 }
 
 // SigningEntry is optionally present when an event includes a binary that is signed
