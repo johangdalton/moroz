@@ -35,9 +35,9 @@ const (
 // sessionTTL bounds how long a preflight's pinned snapshot is served.
 const sessionTTL = 15 * time.Minute
 
-// mismatchCleanBackoff limits rule_count_mismatch CLEAN syncs to one per
-// machine per hour, so a rule Santa keeps rejecting cannot force a CLEAN on
-// every sync.
+// mismatchCleanBackoff limits rule_count_mismatch and rules_hash_mismatch
+// CLEAN syncs to one per machine per hour, so a machine that keeps failing a
+// check cannot force a CLEAN on every sync.
 const mismatchCleanBackoff = time.Hour
 
 // reportedRules is the number of server-delivered execution rules in the
@@ -96,8 +96,8 @@ func configDigest(config santa.Config) string {
 
 // decide chooses between CLEAN and NORMAL for this preflight. The safety nets
 // (client request, no acknowledgement, periodic dithered CLEAN, zero reported
-// rules, a reported rule count that differs from the acknowledged policy)
-// apply regardless of the incremental-sync flag. With the flag off a
+// rules, a reported rule count that differs from the acknowledged policy, an
+// open rules hash finding) apply regardless of the incremental-sync flag. With the flag off a
 // changed policy is always a CLEAN sync with the full list, and an unchanged
 // one a NORMAL sync with the full list (historic passthrough). With the flag
 // on the TOML's sync_type is ignored and a changed policy becomes a NORMAL
@@ -122,6 +122,9 @@ func (svc *SantaService) decide(ctx context.Context, machine string, config sant
 		return full
 	case previous.ConfigDigest == digest && reportedRules(p) != expectedRules(config.Rules) && now.Sub(previous.LastCleanAt) >= mismatchCleanBackoff:
 		full.reason = "rule_count_mismatch"
+		return full
+	case svc.hashes.has(machine) && now.Sub(previous.LastCleanAt) >= mismatchCleanBackoff:
+		full.reason = "rules_hash_mismatch"
 		return full
 	case previous.ConfigDigest == digest:
 		unchanged := syncDecision{mode: decisionNormalUnchanged, reason: "digest_unchanged", previousGeneration: previous.Generation}

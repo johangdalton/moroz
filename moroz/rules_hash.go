@@ -86,7 +86,8 @@ const (
 )
 
 // HashFinding is one machine whose reported rules hash failed a check. It is
-// reported on /healthz until a CLEAN sync of that machine verifies.
+// reported on /healthz, and forces a CLEAN at most once an hour, until a CLEAN
+// sync of that machine verifies.
 type HashFinding struct {
 	MachineID string    `json:"machine_id"`
 	Kind      string    `json:"kind"`
@@ -119,6 +120,13 @@ func (f *hashFindings) verify(machine string) {
 	f.verified++
 }
 
+func (f *hashFindings) has(machine string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.open[machine]
+	return ok
+}
+
 func (f *hashFindings) snapshot() ([]HashFinding, int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,8 +139,8 @@ func (f *hashFindings) snapshot() ([]HashFinding, int64) {
 }
 
 // checkPreflightHash compares the hash a machine reports now with the one it
-// reported when it last acknowledged a sync. Warn only: the rule-count check
-// and the periodic CLEAN repair, this reports.
+// reported when it last acknowledged a sync. It runs before decide, so a
+// finding turns this same sync into a CLEAN (rules_hash_mismatch).
 func (svc *SantaService) checkPreflightHash(machine string, p santa.PreflightPayload) {
 	previous, ok := svc.acks.Get(machine)
 	if !ok || previous.RulesHash == "" || p.RulesHash == "" || previous.RulesHash == p.RulesHash {
