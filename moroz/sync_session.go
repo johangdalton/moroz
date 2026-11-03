@@ -215,6 +215,7 @@ func diffRules(before, after []santa.Rule) []santa.Rule {
 func (svc *SantaService) beginSync(ctx context.Context, machine string, config santa.Config, generation string, p santa.PreflightPayload) santa.Preflight {
 	now := svc.now()
 	digest := configDigest(config)
+	svc.checkPreflightHash(machine, p)
 	decision := svc.decide(ctx, machine, config, generation, digest, p, now)
 	rules := decision.rules
 	if rules == nil {

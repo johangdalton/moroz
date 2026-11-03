@@ -12,6 +12,9 @@ import (
 
 func (svc *SantaService) Postflight(ctx context.Context, machineID string, p santa.PostflightPayload) (*santa.Postflight, error) {
 	session, acknowledged := svc.finishSync(machineID, p)
+	if acknowledged {
+		svc.checkCleanHash(machineID, session, p)
+	}
 	if !acknowledged {
 		level.Warn(svc.logger).Log("msg", "postflight without acknowledgement; next sync will be CLEAN", "machine_id", machineID,
 			"session", session.decision != "", "rules_received", p.RulesReceived, "rules_processed", p.RulesProcessed)

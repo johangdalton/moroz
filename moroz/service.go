@@ -30,6 +30,7 @@ type SantaService struct {
 	now                func() time.Time
 	decisions          syncCounters
 	invalidEvents      atomic.Int64
+	hashes             hashFindings
 	global             santa.Config
 	repo               ConfigStore
 	eventDir           string
@@ -149,6 +150,10 @@ type SyncStats struct {
 	NormalUnchanged      int64  `json:"normal_unchanged"`
 	LastDecision         string `json:"last_decision,omitempty"`
 	InvalidEventsSkipped int64  `json:"invalid_events_skipped"`
+	// RulesHashVerified counts CLEAN syncs whose reported hash matched the
+	// served rules; RulesHashFindings lists machines that failed a check.
+	RulesHashVerified int64         `json:"rules_hash_verified"`
+	RulesHashFindings []HashFinding `json:"rules_hash_findings"`
 }
 
 // SyncStats returns the current counters; they reset on restart except the
@@ -165,6 +170,7 @@ func (svc *SantaService) SyncStats() SyncStats {
 	if last := svc.decisions.last.Load(); last != nil {
 		stats.LastDecision = *last
 	}
+	stats.RulesHashFindings, stats.RulesHashVerified = svc.hashes.snapshot()
 	return stats
 }
 
