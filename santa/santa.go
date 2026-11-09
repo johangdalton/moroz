@@ -154,7 +154,7 @@ var (
 	preflightAliases  = map[string]string{"sipStatus": "sip_status", "rulesHash": "rules_hash"}
 	postflightAliases = map[string]string{"syncType": "sync_type", "rulesHash": "rules_hash"}
 	eventAliases      = map[string]string{"entitlementInfo": "entitlement_info", "csFlags": "cs_flags", "signingStatus": "signing_status",
-		"secureSigningTime": "secure_signing_time", "signingTime": "signing_time"}
+		"secureSigningTime": "secure_signing_time", "signingTime": "signing_time", "identityUnverified": "identity_unverified"}
 )
 
 // renameKeys rewrites each camelCase key of a JSON object to its snake_case
@@ -269,6 +269,10 @@ type EventUploadEvent struct {
 	SecureSigningTime uint32          `json:"secure_signing_time,omitempty"`
 	SigningTime       uint32          `json:"signing_time,omitempty"`
 	StaticRule        bool            `json:"static_rule,omitempty"`
+	// IdentityUnverified (v1.proto Event 37, Santa 2026.9+): Santa could not
+	// confirm the file it evaluated is the image the kernel loaded. The
+	// decision is real; hash and signing fields are report-only.
+	IdentityUnverified bool `json:"identity_unverified,omitempty"`
 }
 
 func (e *EventUploadEvent) UnmarshalJSON(data []byte) error {

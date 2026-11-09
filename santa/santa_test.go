@@ -252,7 +252,7 @@ func TestEventUploadEventForwardsIdentityFields(t *testing.T) {
 		"file_bundle_id":"us.zoom.CptHost","file_bundle_name":"zoom.us","file_bundle_path":"/Applications/zoom.us.app","file_bundle_version":"12345","file_bundle_version_string":"6.1.0",
 		"file_bundle_executable_rel_path":"Contents/MacOS/CptHost","file_bundle_hash":"` + strings.Repeat("b", 64) + `","file_bundle_binary_count":7,
 		"signing_chain":[{"sha256":"` + strings.Repeat("c", 64) + `","cn":"Developer ID Application: Zoom","org":"Zoom Video Communications, Inc.","ou":"BJ4HAAB9B3","valid_from":1600000000,"valid_until":1900000000}],
-		"signing_status":"SIGNING_STATUS_PRODUCTION","cs_flags":570503953,"signing_time":1700000000,"secure_signing_time":1700000001,"static_rule":true,
+		"signing_status":"SIGNING_STATUS_PRODUCTION","cs_flags":570503953,"signing_time":1700000000,"secure_signing_time":1700000001,"static_rule":true,"identity_unverified":true,
 		"entitlement_info":{"entitlements_filtered":false,"entitlements":[{"key":"com.apple.security.cs.allow-jit","value":"true"}]},
 		"decision":"BLOCK_UNKNOWN","parent_name":"launchd","logged_in_users":["student"],"current_sessions":["student@console"],"execution_time":1758000000.5,"pid":4242,"ppid":1,
 		"team_id":"BJ4HAAB9B3","signing_id":"BJ4HAAB9B3:us.zoom.CptHost","cdhash":"` + strings.Repeat("d", 40) + `"}`
@@ -261,7 +261,7 @@ func TestEventUploadEventForwardsIdentityFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ev.FileBundleName != "zoom.us" || ev.FileBundleBinaryCount != 7 || ev.SigningStatus != "SIGNING_STATUS_PRODUCTION" || ev.CsFlags != 570503953 ||
-		ev.SigningTime != 1700000000 || ev.SecureSigningTime != 1700000001 || !ev.StaticRule || len(ev.SigningChain) != 1 || ev.SigningChain[0].Organization != "Zoom Video Communications, Inc." {
+		ev.SigningTime != 1700000000 || ev.SecureSigningTime != 1700000001 || !ev.StaticRule || !ev.IdentityUnverified || len(ev.SigningChain) != 1 || ev.SigningChain[0].Organization != "Zoom Video Communications, Inc." {
 		t.Fatalf("%+v", ev)
 	}
 	out, err := json.Marshal(ev)
@@ -280,7 +280,7 @@ func TestEventUploadEventForwardsIdentityFields(t *testing.T) {
 	var plain EventUploadEvent
 	json.Unmarshal([]byte(`{"file_sha256":"x","quarantine_timestamp":1,"quarantine_data_url":"https://example.com"}`), &plain)
 	out, _ = json.Marshal(plain)
-	if strings.Contains(string(out), "entitlement_info") || strings.Contains(string(out), "static_rule") {
+	if strings.Contains(string(out), "entitlement_info") || strings.Contains(string(out), "static_rule") || strings.Contains(string(out), "identity_unverified") {
 		t.Fatalf("zero identity fields emitted: %s", out)
 	}
 }
@@ -352,5 +352,17 @@ func TestCamelCaseFieldsFromSanta(t *testing.T) {
 	out, _ := json.Marshal(ev)
 	if !strings.Contains(string(out), `"signing_status":"SIGNING_STATUS_PRODUCTION"`) {
 		t.Fatalf("forwarded under the wrong name: %s", out)
+	}
+}
+
+// Santa 2026.9 adds identity_unverified (v1.proto Event 37). It has an explicit
+// json_name, but accept the camelCase spelling as for the other identity fields.
+func TestEventUploadEventIdentityUnverifiedCamelCase(t *testing.T) {
+	var ev EventUploadEvent
+	if err := json.Unmarshal([]byte(`{"file_sha256":"`+strings.Repeat("a", 64)+`","decision":"BLOCK_BINARY_MISMATCH","identityUnverified":true}`), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if !ev.IdentityUnverified || ev.Decision != "BLOCK_BINARY_MISMATCH" {
+		t.Fatalf("%+v", ev)
 	}
 }
